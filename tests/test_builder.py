@@ -139,8 +139,63 @@ def test_build_rejects_when_target_project_dir_is_symlink(tmp_path):
         link.symlink_to(outside, target_is_directory=True)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported in this environment")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="symlink_target_rejected"):
         build_project(python_spec(), workspace, now=FIXED_NOW)
+
+
+def test_build_rejects_dangling_symlink_project_dir(tmp_path):
+    # A symlink at workspace/<name> pointing at a target that does NOT
+    # exist: Path.exists() follows the link and returns False for a
+    # dangling link, so a guard written as `.exists() and .is_symlink()`
+    # is skipped entirely and resolve() would then happily follow the
+    # link. is_symlink() alone must be used, unconditionally.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    link = workspace / "erku-1f916-tiny-tool"
+    missing_target = tmp_path / "does-not-exist" / "also-missing"
+    try:
+        link.symlink_to(missing_target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+    assert not link.exists()  # confirms the link is genuinely dangling
+    assert link.is_symlink()
+    with pytest.raises(ValueError, match="symlink_target_rejected"):
+        build_project(python_spec(), workspace, now=FIXED_NOW)
+
+
+def test_reject_if_symlinked_detects_symlinked_ancestor(tmp_path):
+    from f916.builder import _reject_if_symlinked
+
+    project_dir = tmp_path / "erku-1f916-tiny-tool"
+    project_dir.mkdir()
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    try:
+        (project_dir / "src").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+    with pytest.raises(ValueError, match="symlink_target_rejected"):
+        _reject_if_symlinked(project_dir, project_dir / "src" / "pkg" / "__init__.py")
+
+
+def test_build_rejects_symlinked_intermediate_directory(tmp_path):
+    # Plant a symlinked intermediate directory (not the leaf file itself)
+    # at a path the python-tool template is about to write into, and
+    # confirm the whole build is refused rather than writing through it.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    project_dir = workspace / "erku-1f916-tiny-tool"
+    project_dir.mkdir()
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    try:
+        (project_dir / "src").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+    with pytest.raises(ValueError, match="symlink_target_rejected"):
+        build_project(python_spec(), workspace, now=FIXED_NOW)
+    # Nothing should have been written through the symlink.
+    assert list(outside.iterdir()) == []
 
 
 # --- file-count / size / total-size limits -----------------------------------
@@ -218,19 +273,51 @@ def test_build_is_reproducible_across_workspaces(tmp_path):
 
 
 def test_tree_hash_independent_of_created_utc(tmp_path):
-    # Same calendar year (so year-derived content like the LICENSE is
-    # unchanged) but a different timestamp: created_utc must differ while
-    # tree_hash — which never folds in the timestamp itself — must not.
+    # Different *calendar years* (not just a different time-of-day): no
+    # rendered file (including LICENSE) may embed anything derived from
+    # `now`, so created_utc must differ while tree_hash and every per-file
+    # sha256 stay identical.
     ws1 = tmp_path / "ws1"
     ws2 = tmp_path / "ws2"
     ws1.mkdir()
     ws2.mkdir()
     spec = report_spec()
-    later_same_year = datetime(2024, 11, 30, 23, 59, 59, tzinfo=timezone.utc)
+    other_year = datetime(2030, 6, 1, 8, 30, 0, tzinfo=timezone.utc)
     manifest1 = build_project(dict(spec), ws1, now=FIXED_NOW)
-    manifest2 = build_project(dict(spec), ws2, now=later_same_year)
+    manifest2 = build_project(dict(spec), ws2, now=other_year)
+    assert manifest1["created_utc"] != manifest2["created_utc"]
+    assert manifest1["created_utc"].startswith("2024")
+    assert manifest2["created_utc"].startswith("2030")
+    assert manifest1["tree_hash"] == manifest2["tree_hash"]
+    files1 = {f["path"]: f["sha256"] for f in manifest1["files"]}
+    files2 = {f["path"]: f["sha256"] for f in manifest2["files"]}
+    assert files1 == files2
+
+
+def test_tree_hash_independent_of_created_utc_python_tool(tmp_path):
+    # Same check for the other template, since LICENSE is rendered
+    # independently in each template's render function.
+    ws1 = tmp_path / "ws1"
+    ws2 = tmp_path / "ws2"
+    ws1.mkdir()
+    ws2.mkdir()
+    spec = python_spec()
+    other_year = datetime(1999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    manifest1 = build_project(dict(spec), ws1, now=FIXED_NOW)
+    manifest2 = build_project(dict(spec), ws2, now=other_year)
     assert manifest1["created_utc"] != manifest2["created_utc"]
     assert manifest1["tree_hash"] == manifest2["tree_hash"]
+    files1 = {f["path"]: f["sha256"] for f in manifest1["files"]}
+    files2 = {f["path"]: f["sha256"] for f in manifest2["files"]}
+    assert files1 == files2
+
+
+def test_license_text_has_no_year(tmp_path):
+    manifest = build_project(python_spec(), tmp_path, now=FIXED_NOW)
+    license_text = (tmp_path / manifest["name"] / "LICENSE").read_text(encoding="utf-8")
+    assert "Copyright (c) erku-1f916" in license_text
+    for year in ("2024", "2023", "2025", "1999", "2030"):
+        assert year not in license_text
 
 
 # --- manifest validity ----------------------------------------------------------
@@ -294,7 +381,8 @@ def test_python_tool_template_builds_expected_files(tmp_path):
     assert "source_hash" in readme
     assert "executes no community-supplied commands" in readme
     license_text = (project_dir / "LICENSE").read_text(encoding="utf-8")
-    assert "2024" in license_text
+    assert "MIT License" in license_text
+    assert "erku-1f916" in license_text
     init_text = (project_dir / "src" / "erku_1f916_tiny_tool" / "__init__.py").read_text(encoding="utf-8")
     assert "42" in init_text
     assert "subprocess" not in init_text

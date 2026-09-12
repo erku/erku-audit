@@ -77,9 +77,12 @@ def _provenance_line(spec: dict) -> str:
     return ' | '.join(parts)
 
 
-def _license_text(year: int) -> str:
+def _license_text() -> str:
+    # No year is embedded here on purpose: tree_hash must be independent of
+    # created_utc, and a year derived from `now` would leak timestamp-derived
+    # content into every hashed file across a calendar-year boundary.
     return (
-        f'MIT License\n\nCopyright (c) {year} erku-1f916\n\n'
+        'MIT License\n\nCopyright (c) erku-1f916\n\n'
         'Permission is hereby granted, free of charge, to any person obtaining a copy '
         'of this software and associated documentation files (the "Software"), to deal '
         'in the Software without restriction, including without limitation the rights '
@@ -137,7 +140,7 @@ def _render_python_tool(spec: dict) -> dict:
 
     files: dict[str, str] = {}
     files['README.md'] = _readme_text(spec)
-    files['LICENSE'] = _license_text(_now_year(spec))
+    files['LICENSE'] = _license_text()
     files['pyproject.toml'] = (
         '[build-system]\n'
         'requires = ["setuptools>=70"]\n'
@@ -192,7 +195,7 @@ def _render_static_report(spec: dict) -> dict:
 
     files: dict[str, str] = {}
     files['README.md'] = _readme_text(spec, extra='See `index.html` and `data/report.json`.')
-    files['LICENSE'] = _license_text(_now_year(spec))
+    files['LICENSE'] = _license_text()
     files['index.html'] = (
         '<!DOCTYPE html>\n'
         '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
@@ -217,9 +220,18 @@ def _render_static_report(spec: dict) -> dict:
     return files
 
 
-def _now_year(spec: dict) -> int:
-    # Filled in by build_project before rendering; see below.
-    return spec['_build_year']
+def _reject_if_symlinked(base_dir: Path, target: Path) -> None:
+    """Reject `target`, or any ancestor between it and `base_dir`, that is a
+    symlink (including a dangling one). Checked on the *unresolved* path so a
+    symlink is never silently followed — `Path.resolve()` would otherwise
+    walk straight through it before we get a chance to look."""
+    if target.is_symlink():
+        _fail('symlink_target_rejected')
+    for parent in target.parents:
+        if parent == base_dir:
+            break
+        if parent.is_symlink():
+            _fail('symlink_target_rejected')
 
 
 def _check_paths(project_dir: Path, files: dict[str, str]) -> None:
@@ -236,15 +248,7 @@ def _check_paths(project_dir: Path, files: dict[str, str]) -> None:
         if '..' in p.parts:
             _fail('path_traversal_rejected')
         unresolved_target = project_dir / p
-        # Check the leaf and every ancestor *without* resolving through
-        # symlinks first, since resolve() would silently follow them.
-        if unresolved_target.is_symlink():
-            _fail('symlink_target_rejected')
-        for parent in unresolved_target.parents:
-            if parent == project_dir:
-                break
-            if parent.is_symlink():
-                _fail('symlink_target_rejected')
+        _reject_if_symlinked(project_dir, unresolved_target)
         resolved_target = unresolved_target.resolve()
         try:
             resolved_target.relative_to(resolved_root)
@@ -284,7 +288,10 @@ def build_project(spec: dict, workspace: str | Path, *, now=None) -> dict:
     template = spec['template']
     workspace_path = Path(workspace).resolve()
     project_dir = (workspace_path / name)
-    if project_dir.exists() and project_dir.is_symlink():
+    # Path.is_symlink() returns True for a symlink even when it dangles
+    # (points at a nonexistent target), where .exists() would return False
+    # and follow the link. Never gate this on .exists().
+    if project_dir.is_symlink():
         _fail('symlink_target_rejected')
     project_dir_resolved = project_dir.resolve()
     try:
@@ -293,7 +300,6 @@ def build_project(spec: dict, workspace: str | Path, *, now=None) -> dict:
         _fail('path_escapes_workspace')
 
     render_spec = dict(spec)
-    render_spec['_build_year'] = now.year
 
     if template == 'python-tool':
         files = _render_python_tool(render_spec)
@@ -314,9 +320,17 @@ def build_project(spec: dict, workspace: str | Path, *, now=None) -> dict:
         text = files[rel_path]
         encoded = text.encode('utf-8')
         target = project_dir / rel_path
+        # Re-check right before creating directories: _check_paths ran
+        # earlier, and an ancestor could have been swapped for a symlink in
+        # the window between that validation pass and this write (TOCTOU),
+        # or by an earlier iteration of this very loop. Checking again here
+        # also means we never call mkdir(parents=True) through a symlink.
+        _reject_if_symlinked(project_dir, target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_symlink():
-            _fail('symlink_target_rejected')
+        # Re-check once more after mkdir: exist_ok=True silently no-ops on
+        # an already-existing path, so a swap that landed exactly during the
+        # mkdir call would otherwise go unnoticed until the write below.
+        _reject_if_symlinked(project_dir, target)
         target.write_bytes(encoded)
         digest = hashlib.sha256(encoded).hexdigest()
         file_records.append({'path': rel_path, 'sha256': digest, 'bytes': len(encoded)})
