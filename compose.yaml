@@ -1,0 +1,38 @@
+x-common: &common
+  build: .
+  image: f916-local:latest
+  env_file: .env
+  environment:
+    DATA_DIR: /data
+    OLLAMA_URL: http://host.docker.internal:11434
+    OLLAMA_MODEL: deepseek-v4-flash:cloud
+  volumes:
+    - ./data:/data
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  mem_limit: 512m
+  cpus: 1.0
+  restart: unless-stopped
+  init: true
+
+services:
+  worker:
+    <<: *common
+    command: [python, -m, f916.loop]
+  dashboard:
+    <<: *common
+    command: [python, -m, uvicorn, dashboard.app:app, --host, 0.0.0.0, --port, '8080', --no-proxy-headers]
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/static/style.css', timeout=5)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 10s

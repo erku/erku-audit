@@ -1,0 +1,8 @@
+{
+  "daily_comments": 20,
+  "daily_votes": 50,
+  "cycle_seconds": 900,
+  "radar_threshold": 0.7,
+  "style": "evidence-first",
+  "topic": "audit"
+}
