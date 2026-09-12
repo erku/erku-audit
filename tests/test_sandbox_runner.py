@@ -1,4 +1,5 @@
 import json
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -78,3 +79,63 @@ def test_run_job_never_raises_on_missing_job_files(tmp_path):
     assert 'error' in result
     on_disk = json.loads((job_dir / 'result.json').read_text(encoding='utf-8'))
     assert on_disk == result
+
+
+def test_run_job_test_cannot_escape_to_shared_jobs_volume(tmp_path):
+    # `tmp_path` here stands in for the shared /data/sandbox-jobs volume:
+    # it holds this job's dir plus a sibling "victim" job dir, exactly like
+    # the real jobs volume holds every job side by side.
+    victim_dir = tmp_path / 'job-victim'
+    victim_project = victim_dir / 'project'
+    victim_project.mkdir(parents=True)
+    (victim_dir / 'job.json').write_text(json.dumps({'id': 'job-victim'}), encoding='utf-8')
+
+    job_dir = _make_job(tmp_path, 'job-escape', """
+        from pathlib import Path
+
+        def test_attempts_relative_escape():
+            # If pytest ran with cwd inside the shared jobs volume, this
+            # would land next to a sibling job (e.g. overwrite its
+            # result.json). It must instead land in a private tmpfs copy
+            # that gets cleaned up, never in the shared volume.
+            Path('../escaped.txt').write_text('pwned', encoding='utf-8')
+            assert True
+    """)
+
+    result = run_job(job_dir)
+
+    assert result['passed'] is True
+    # No stray file anywhere under the shared jobs volume: not next to this
+    # job, not in the victim's project dir, not in the volume root.
+    assert not (tmp_path / 'escaped.txt').exists()
+    assert not (job_dir / 'escaped.txt').exists()
+    assert list(victim_project.iterdir()) == []
+    # The runner (not the test process) still wrote the real result back.
+    on_disk = json.loads((job_dir / 'result.json').read_text(encoding='utf-8'))
+    assert on_disk == result
+
+
+def test_run_job_copies_project_into_runners_own_tempdir(tmp_path, monkeypatch):
+    captured = {}
+    real_mkdtemp = tempfile.mkdtemp
+
+    def spy_mkdtemp(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        captured['path'] = path
+        return path
+
+    monkeypatch.setattr('sandbox.runner.tempfile.mkdtemp', spy_mkdtemp)
+
+    job_dir = _make_job(tmp_path, 'job-tempcopy', """
+        def test_ok():
+            assert True
+    """)
+
+    result = run_job(job_dir)
+
+    assert result['passed'] is True
+    assert captured.get('path'), 'run_job did not copy the project via tempfile.mkdtemp'
+    work_dir = Path(captured['path'])
+    assert str(work_dir).startswith(tempfile.gettempdir())
+    # Cleaned up after the run: nothing left behind under /tmp.
+    assert not work_dir.exists()

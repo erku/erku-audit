@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -48,10 +50,10 @@ def run_job(job_dir: Path) -> dict:
     """Run one job's tests and write `result.json` atomically.
 
     Reads `job_dir/job.json` (`{'id':.., 'test_path': 'tests' (optional)}`),
-    runs pytest against `job_dir/project/<test_path or '.'>` with cwd set to
-    the project dir, and writes back a result dict. Never raises: any
-    failure while reading the job or running the subprocess is captured as
-    a failed result instead of propagating out of the poll loop.
+    runs pytest against a private copy of `job_dir/project/<test_path or
+    '.'>`, and writes back a result dict to the original `job_dir`. Never
+    raises: any failure while reading the job or running the subprocess is
+    captured as a failed result instead of propagating out of the poll loop.
     """
     job_dir = Path(job_dir)
     job_id = job_dir.name
@@ -60,33 +62,60 @@ def run_job(job_dir: Path) -> dict:
         job_id = job.get('id', job_id)
         test_path = job.get('test_path') or '.'
         project_dir = job_dir / 'project'
-        target = project_dir / test_path
         timeout = _timeout_seconds()
+        # Cross-job escape fix: never run the test process with cwd inside
+        # the shared jobs volume. That volume holds every job side by side,
+        # so a malicious test running there could write e.g.
+        # `../<other-job-id>/result.json` and forge or corrupt a sibling
+        # job's result -- defeating the isolation this runner exists to
+        # provide. Instead, copy the project into a fresh directory under
+        # the runner's own tmpfs (tempfile.mkdtemp() lands under /tmp, which
+        # compose.yaml mounts as a private `tmpfs` for this container) and
+        # run pytest there. That copy has no siblings, so a relative `../`
+        # escape from cwd can no longer reach any other job's files. Only
+        # the runner itself (not the test process) writes back into
+        # job_dir/result.json, and it does so atomically as before.
+        #
+        # Residual NOT closed by this fix: a sufficiently motivated test
+        # could still reach the shared volume via an *absolute* path (e.g.
+        # hardcoding '/data/sandbox-jobs/...') rather than a relative `../`
+        # escape from cwd. Closing that needs per-job filesystem/container
+        # isolation (a follow-up) -- this change only closes the cwd-relative
+        # escape the security review flagged.
+        work_dir = None
         try:
-            proc = subprocess.run(
-                [sys.executable, '-m', 'pytest', '-q', str(target)],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            summary = _truncate_summary((proc.stdout or '') + (proc.stderr or ''))
-            result = {
-                'id': job_id,
-                'passed': proc.returncode == 0,
-                'returncode': proc.returncode,
-                'summary': summary,
-            }
-        except subprocess.TimeoutExpired as exc:
-            out = exc.stdout if isinstance(exc.stdout, str) else ''
-            err = exc.stderr if isinstance(exc.stderr, str) else ''
-            result = {
-                'id': job_id,
-                'passed': False,
-                'timed_out': True,
-                'returncode': None,
-                'summary': _truncate_summary(out + err),
-            }
+            work_dir = Path(tempfile.mkdtemp(prefix='sandbox-job-'))
+            work_project_dir = work_dir / 'project'
+            shutil.copytree(project_dir, work_project_dir)
+            target = work_project_dir / test_path
+            try:
+                proc = subprocess.run(
+                    [sys.executable, '-m', 'pytest', '-q', str(target)],
+                    cwd=work_project_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                summary = _truncate_summary((proc.stdout or '') + (proc.stderr or ''))
+                result = {
+                    'id': job_id,
+                    'passed': proc.returncode == 0,
+                    'returncode': proc.returncode,
+                    'summary': summary,
+                }
+            except subprocess.TimeoutExpired as exc:
+                out = exc.stdout if isinstance(exc.stdout, str) else ''
+                err = exc.stderr if isinstance(exc.stderr, str) else ''
+                result = {
+                    'id': job_id,
+                    'passed': False,
+                    'timed_out': True,
+                    'returncode': None,
+                    'summary': _truncate_summary(out + err),
+                }
+        finally:
+            if work_dir is not None:
+                shutil.rmtree(work_dir, ignore_errors=True)
     except Exception as exc:  # noqa: BLE001 - never raise out of the poll loop
         result = {
             'id': job_id,
