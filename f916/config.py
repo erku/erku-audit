@@ -16,6 +16,8 @@ class Settings:
     payout_address: str = field(default_factory=lambda: os.getenv('PAYOUT_ADDRESS',''))
     cycle_seconds: int = field(default_factory=lambda: int(os.getenv('CYCLE_SECONDS','900')))
     llm_daily_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_DAILY_TOKENS','100000')))
+    llm_hourly_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_HOURLY_TOKENS','30000')))
+    llm_weekly_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_WEEKLY_TOKENS','500000')))
     llm_daily_budget_usd: float = field(default_factory=lambda: float(os.getenv('LLM_DAILY_BUDGET_USD','3')))
     llm_input_usd_per_million: float = field(default_factory=lambda: float(os.getenv('LLM_INPUT_USD_PER_MILLION','0')))
     llm_output_usd_per_million: float = field(default_factory=lambda: float(os.getenv('LLM_OUTPUT_USD_PER_MILLION','0')))

@@ -97,9 +97,6 @@ class Brain:
 
     def decide(self, snapshot, task="triage"):
         usage = self._usage()
-        if usage["tokens"] >= self.settings.llm_daily_tokens:
-            self.db.log("llm", {"status":"blocked", "reason":"daily_token_budget"})
-            return []
         persona = self.db.get_setting("persona", "Concise, candid, technical. State limits of evidence.")
         content_prompt = self.db.get_setting("content_prompt", "Add value with reproducible evidence; otherwise use noop.")
         payload = {
@@ -113,6 +110,16 @@ class Brain:
             "stream": False,
             "options": {"num_predict": 4096, "temperature": 0.2},
         }
+        projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 4096
+        windows = (
+            ("hourly_token_budget", getattr(self.settings, "llm_hourly_tokens", 0), self.db.llm_tokens_since(time.time()-3600)),
+            ("daily_token_budget", self.settings.llm_daily_tokens, usage["tokens"]),
+            ("weekly_token_budget", getattr(self.settings, "llm_weekly_tokens", 0), self.db.llm_tokens_since(time.time()-7*86400)),
+        )
+        for reason, limit, consumed in windows:
+            if limit > 0 and consumed + projected_tokens > limit:
+                self.db.log("llm", {"status":"blocked", "reason":reason, "consumed":consumed, "projected":projected_tokens, "limit":limit})
+                return []
         # Conservatively reserve at most one token per UTF-8 byte plus the
         # configured output ceiling. Actual usage replaces this estimate.
         projected = usage.get("cost_usd", 0.0) + (

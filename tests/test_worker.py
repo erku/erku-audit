@@ -63,6 +63,18 @@ def test_brain_blocks_before_exceeding_usd_budget(tmp_path):
     assert not called
     assert db.events('llm')[0]['data']['reason']=='daily_usd_budget'
 
+def test_brain_blocks_before_exceeding_hourly_token_budget(tmp_path):
+    from f916.brain import Brain
+    called=False
+    def handler(request):
+        nonlocal called; called=True
+        return httpx.Response(500)
+    db=Database(tmp_path/'state.db'); db.initialize()
+    settings=Settings(data_dir=tmp_path,llm_hourly_tokens=1)
+    assert Brain(settings,db,transport=httpx.MockTransport(handler)).decide({'items':[]})==[]
+    assert not called
+    assert db.events('llm')[0]['data']['reason']=='hourly_token_budget'
+
 
 def test_cycle_skips_llm_when_snapshot_unchanged_and_quarantines_per_item(tmp_path):
     from f916.loop import Worker

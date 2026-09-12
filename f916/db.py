@@ -44,6 +44,14 @@ class Database:
         with self.connect() as c:
             rows=c.execute('SELECT * FROM events '+('WHERE kind=? ' if kind else '')+'ORDER BY id DESC LIMIT ?',((kind,) if kind else ())+(min(max(limit,1),1000),)).fetchall()
         return [dict(r)|{'data':json.loads(r['data'])} for r in rows]
+    def llm_tokens_since(self, cutoff):
+        with self.connect() as c:
+            rows=c.execute("SELECT data FROM events WHERE kind='llm' AND created_at>=?",(cutoff,)).fetchall()
+        total=0
+        for row in rows:
+            data=json.loads(row[0])
+            total += int(data.get('prompt_tokens') or 0) + int(data.get('output_tokens') or 0)
+        return total
     def queue(self,intent,reason):
         clean=redact(intent,self.secrets); fp=fingerprint(clean)
         with self.connect() as c:
