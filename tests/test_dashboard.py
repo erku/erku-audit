@@ -106,6 +106,35 @@ def test_health_and_budget_status_are_visible(panel):
     assert 'Stan workera i budżet Ollama' in page.text
 
 
+def test_results_page_renders_on_empty_db(panel):
+    client, db = panel
+    response = client.get('/results', auth=('admin', 'test-password'))
+    assert response.status_code == 200
+    assert '0.00 USD' in response.text
+    assert '0%' in response.text
+
+
+def test_results_page_shows_earnings_and_win_rate(panel):
+    client, db = panel
+    db.log('outcome', {'listing_id': 1, 'submission_id': 1, 'state': 'paid', 'amount_atomic': '1000000'})
+    metrics = db.get_setting('reward_metrics', {})
+    metrics['outside_funded_earnings_usd'] = 12.5
+    db.set_setting('reward_metrics', metrics)
+    response = client.get('/results', auth=('admin', 'test-password'))
+    assert response.status_code == 200
+    assert '12.50 USD' in response.text
+    assert '100.0%' in response.text
+
+
+def test_results_page_counts_template_hits(panel):
+    client, db = panel
+    db.log('opportunity', {'listing_id': 2, 'classification': 'supported', 'template_id': 'rail-report-v1'})
+    response = client.get('/results', auth=('admin', 'test-password'))
+    assert response.status_code == 200
+    assert 'rail-report-v1' in response.text
+    assert 'Trafienia szablonów: <strong>1</strong>' in response.text
+
+
 def test_token_limit_toggle_is_persisted(panel):
     client,db=panel; auth=('admin','test-password'); csrf=token(client)
     response=client.post('/settings/token-limits',auth=auth,data={'token_limits_form':'1','enabled':'true','csrf':csrf})
