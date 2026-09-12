@@ -35,9 +35,22 @@ class Settings:
     broker_url: str = field(default_factory=lambda: os.getenv('BROKER_URL',''))
     broker_token: str = field(default_factory=lambda: os.getenv('BROKER_TOKEN',''), repr=False)
     max_projects: int = field(default_factory=lambda: int(os.getenv('MAX_PROJECTS','3')))
+    # Deterministic paid-verifier engine (Task V): computing + signing a
+    # verdict is always safe, but posting one requires both this flag AND a
+    # confirmed submission endpoint (not yet wired) -- see f916/verifier.py.
+    verifier_enabled: bool = field(default_factory=lambda: _bool_env('VERIFIER_ENABLED','false'))
+    # Isolated test sandbox (Task S): the worker drops jobs here for
+    # sandbox/runner.py, which runs in a separate, network-less,
+    # secret-less container and communicates back via this same directory.
+    sandbox_jobs_dir: Path = field(default_factory=lambda: Path(os.getenv('SANDBOX_JOBS_DIR')) if os.getenv('SANDBOX_JOBS_DIR') else None)
+    sandbox_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('SANDBOX_TIMEOUT_SECONDS','120')))
     def __post_init__(self):
         self.data_dir=Path(self.data_dir)
         if self.mode not in {'off','approve','auto'}: raise ValueError('Invalid mode')
         secret=self.data_dir/'citizen-secret.txt'
         if not self.api_key and secret.exists(): self.api_key=secret.read_text().strip()
+        if self.sandbox_jobs_dir is None:
+            self.sandbox_jobs_dir=self.data_dir/'sandbox-jobs'
+        else:
+            self.sandbox_jobs_dir=Path(self.sandbox_jobs_dir)
 
