@@ -16,6 +16,8 @@ from .config import Settings
 from .db import Database
 from .radar import summarize
 from .publisher import Publisher
+from .seal import seal_artifact
+from .payout import PayoutManager
 
 
 def _list(data, key):
@@ -84,10 +86,19 @@ class Worker:
         pulse = self._fetch("/api/pulse", "events", params={"wait":"0"})
         me = self._fetch("/api/me", "since_last_visit", params={"cursor_mode":"id"}) if self.settings.api_key else {}
         front = self._fetch("/api/front", "posts")
+        newest = self._fetch("/api/new", "posts", params={"limit":"15"})
+        changes_state=self.db.get_setting("changes_cursor") or {
+            "since":str(int(time.time()*1000)-max(60,self.settings.cycle_seconds)*1000),
+            "posts_since":"init","comments_since":"init","nulls_since":"done"}
+        changes=self._fetch("/api/changes","posts",params=changes_state)
         listings = self._fetch("/api/listings", "listings")
         grants = self._fetch("/api/grants", "grants")
         # Bound untrusted context and cost even if the upstream response grows.
-        posts = _compact(_list(front, "posts"), ("id","author","title","body","weighted_votes","votes","comments","tags"), 1000, 15)
+        combined=[]; seen=set()
+        for row in _list(changes,"posts")+_list(newest,"posts")+_list(front,"posts"):
+            if isinstance(row,dict) and row.get('id') not in seen:
+                seen.add(row.get('id')); combined.append(row)
+        posts = _compact(combined, ("id","author","title","body","weighted_votes","votes","comments","tags"), 1000, 20)
         safe_items, quarantined = [], []
         learned = self.db.get_setting("defense_patterns", [])
         for post in posts:
@@ -119,13 +130,20 @@ class Worker:
             self.db.log("cycle", {"status":"deferred", "snapshot_hash":digest,
                                   "reason":getattr(self.brain,"last_status","unknown")})
             return {"changed":True,"processed":False}
-        self.db.set_setting("snapshot_hash", digest)
         ack_cursor = me.get("ack_cursor") if isinstance(me,dict) else None
         if ack_cursor:
             try: self.client.post("/api/me/ack", {"up_to":ack_cursor})
             except Exception as exc:
                 self.db.log("cycle", {"status":"ack_error", "error_type":type(exc).__name__})
                 return {"changed":True,"processed":True,"acked":False}
+        if isinstance(changes,dict):
+            self.db.set_setting("changes_cursor",{
+                "since":str(changes.get("next_since",changes_state["since"])),
+                "posts_since":changes.get("next_posts_since") or changes_state["posts_since"],
+                "comments_since":changes.get("next_comments_since") or changes_state["comments_since"],
+                "nulls_since":changes.get("next_nulls_since") or "done",
+            })
+        self.db.set_setting("snapshot_hash", digest)
         self.db.log("radar", {"items":summarize(snapshot["listings"], snapshot["grants"])})
         self.db.log("cycle", {"status":"complete", "snapshot_hash":digest})
         return {"changed":True,"processed":True,"acked":bool(ack_cursor)}
@@ -139,7 +157,17 @@ class Worker:
             except Exception as exc:
                 self.db.log("publisher", {"status":"error","error_type":type(exc).__name__})
                 return None
+        if self.db.get_setting('last_published_artifact_hash') == artifact['hash']:
+            self.db.log('artifact_check',{'status':'unchanged','hash':artifact['hash'],'public_url':artifact.get('public_url')})
+            self.db.set_setting("last_daily_audit", day)
+            return artifact
+        try:
+            sealed=seal_artifact(self.client,self.settings,artifact['hash'],'self-redteam')
+            artifact['seal_id']=sealed.get('id')
+        except Exception as exc:
+            self.db.log("seal", {"status":"error","error_type":type(exc).__name__,"hash":artifact['hash']})
         self.db.log("artifact", artifact)
+        self.db.set_setting('last_published_artifact_hash',artifact['hash'])
         self.db.set_setting("last_daily_audit", day)
         prompt = {"artifact":artifact, "instruction":"Draft at most one evidence-first post. Include exact hash and limitations."}
         for intent in self.brain.decide(prompt, "post_of_the_day"):
@@ -155,6 +183,25 @@ class Worker:
         if self.db.get_setting("last_maintenance") != day:
             redteam(self.db)
             reflect(self.db)
+            def summarized(value):
+                if not isinstance(value,dict): return {"type":type(value).__name__}
+                return {
+                    "counts":{k:len(v) for k,v in value.items() if isinstance(v,list)},
+                    "totals":{k:v for k,v in value.items() if not isinstance(v,(dict,list)) and any(word in k for word in ("total","amount","gmv","liability"))},
+                }
+            rail_data=self._fetch("/api/rail","listings")
+            self.db.log("economy", {
+                "rail":summarized(rail_data),
+                "payouts":summarized(self._fetch("/api/payouts","bindings")),
+                "history":summarized(self._fetch("/api/me/history","posts")) if self.settings.api_key else {},
+                "tags":summarized(self._fetch("/api/tags","tags")),
+            })
+            if self.settings.api_key and self.settings.payout_address:
+                try:
+                    bindings=PayoutManager(self.settings,self.db,self.client).scan_awards(_list(rail_data,'listings'))
+                    if bindings: self.db.log('payout_scan',{'results':bindings})
+                except Exception as exc:
+                    self.db.log('payout_scan',{'status':'error','error_type':type(exc).__name__})
             self.db.set_setting("last_maintenance", day)
         week = time.strftime("%G-W%V", time.gmtime())
         if self.db.get_setting("last_reward_week") != week:

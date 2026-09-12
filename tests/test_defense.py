@@ -36,7 +36,7 @@ def test_real_audit_evidence_and_no_execution(tmp_path):
     assert run('chain-verify', {}, {}, tmp_path)['status'] == 'inconclusive'
     assert run('leak-probe', {'url':'https://example.com/?api_key=SECRET123'}, {}, tmp_path)['status'] == 'findings'
     assert 'SECRET123' not in ''.join(p.read_text() for p in tmp_path.rglob('*.json'))
-    assert run('rail-audit', {'awards':[{'amount':'0.1'},{'amount':'0.2'}], 'receipts':[{'amount':'0.3'}]}, {}, tmp_path)['status'] == 'consistent'
+    assert run('rail-audit', {'awards':[{'amount_atomic':'100000','currency':'USDC'},{'amount_atomic':'200000','currency':'USDC'}], 'receipts':[{'amount_atomic':'300000','currency':'USDC'}]}, {}, tmp_path)['status'] == 'consistent'
     with pytest.raises(ValueError):
         run('shell', {'command':'whoami'}, {}, tmp_path)
 
@@ -98,6 +98,7 @@ def test_incomplete_or_mixed_currency_rail_is_inconclusive(tmp_path):
     from f916.skills import run
     assert run('rail-audit', {'awards':[], 'receipts':[]}, {}, tmp_path)['status'] == 'inconclusive'
     assert run('rail-audit', {'awards':[{'amount':'1','currency':'USD'}], 'receipts':[{'amount':'1','currency':'EUR'}]}, {}, tmp_path)['status'] == 'inconclusive'
+    assert run('rail-audit', {'awards':[{'amount':'0.1','currency':'USDC'}], 'receipts':[{'amount':'0.1','currency':'USDC'}]}, {}, tmp_path)['status'] == 'inconclusive'
 
 
 def test_reflection_persists_only_regression_improvement():

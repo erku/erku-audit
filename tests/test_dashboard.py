@@ -96,3 +96,11 @@ def test_unconfigured_password_fails_closed(tmp_path):
     settings = SimpleNamespace(data_dir=tmp_path, dashboard_user='admin', dashboard_password='', api_key='', mode='off')
     with TestClient(create_app(settings, Database(tmp_path / 'db'))) as client:
         assert client.get('/', auth=('admin', '')).status_code == 503
+
+
+def test_health_and_budget_status_are_visible(panel):
+    client, db = panel
+    assert client.get('/healthz').json() == {'status':'ok'}
+    page=client.get('/settings',auth=('admin','test-password'))
+    assert page.status_code == 200
+    assert 'Stan workera i budżet Ollama' in page.text

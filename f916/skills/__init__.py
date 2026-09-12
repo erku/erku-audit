@@ -3,7 +3,6 @@ import hashlib
 import json
 import shlex
 import uuid
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qsl
 from invariants import redact
@@ -47,17 +46,23 @@ def _rail(target, params):
     try:
         if not isinstance(target.get('awards'),list) or not isinstance(target.get('receipts'),list): raise ValueError()
         if not target['awards'] or not target['receipts']: raise ValueError()
-        currencies = {row.get('currency','unspecified') for key in ('awards','receipts') for row in target[key]}
-        if len(currencies) != 1: raise ValueError()
+        def asset(row):
+            value=row.get('asset')
+            if isinstance(value,dict): return (int(value['chain_id']),str(value['token']).lower())
+            if row.get('chain_id') is not None and row.get('token'): return (int(row['chain_id']),str(row['token']).lower())
+            if row.get('currency'): return ('legacy',str(row['currency']))
+            raise ValueError()
+        assets = {asset(row) for key in ('awards','receipts') for row in target[key]}
+        if len(assets) != 1: raise ValueError()
         totals = []
         for key in ('awards','receipts'):
-            amounts = [Decimal(str(row['amount'])) for row in target[key]]
-            if any(not x.is_finite() or x < 0 for x in amounts): raise ValueError()
-            totals.append(sum(amounts, Decimal(0)))
-    except (KeyError, TypeError, ValueError, AttributeError, InvalidOperation):
-        return {'status':'inconclusive','findings':[], 'summary':'Expected awards and receipts arrays with finite nonnegative amount in one common currency.'}
+            raw=[str(row.get('amount_atomic',row.get('amount',''))) for row in target[key]]
+            if any(not value.isdigit() for value in raw): raise ValueError()
+            totals.append(sum(map(int,raw)))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return {'status':'inconclusive','findings':[], 'summary':'Expected awards and receipts with nonnegative integer atomic amounts in one common asset.'}
     findings = [] if totals[0] == totals[1] else [{'awards':str(totals[0]),'receipts':str(totals[1]),'difference':str(totals[0]-totals[1])}]
-    return {'status':'findings' if findings else 'consistent','findings':findings,'summary':'Compared supplied award and receipt totals with exact decimal arithmetic; no chain or source-authenticity verification.', 'totals':[str(t) for t in totals]}
+    return {'status':'findings' if findings else 'consistent','findings':findings,'summary':'Compared supplied award and receipt totals as atomic integers for one asset; no chain or source-authenticity verification.', 'asset':list(assets)[0], 'totals':[str(t) for t in totals]}
 
 
 def run(skill, target, params, output_dir):

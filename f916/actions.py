@@ -20,6 +20,19 @@ class Executor:
                     if path.is_relative_to(root) and path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest()==intent.hash: return True
                 except OSError: continue
         return False
+    def _submission_valid(self,intent):
+        text=intent.artifact or ''
+        root=(self.settings.data_dir/'artifacts').resolve()
+        for event in self.db.events('artifact',1000):
+            artifact=event['data']; digest=artifact.get('hash'); url=artifact.get('public_url')
+            if not digest or not url or digest not in text or url not in text: continue
+            for filename in artifact.get('evidence_files',[]):
+                path=Path(filename).resolve()
+                try:
+                    if path.is_relative_to(root) and path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest()==digest:
+                        return True
+                except OSError: continue
+        return False
     def dispatch(self,intent,approved=False):
         intent=Intent.model_validate(intent) if isinstance(intent,dict) else intent
         data=intent.model_dump(exclude_none=True); action=intent.action
@@ -34,6 +47,7 @@ class Executor:
         if mode not in {'auto','approve'}: return result('blocked','off')
         if not self.settings.api_key: return result('blocked','observation_only')
         if action=='post' and not self._artifact_valid(intent): return result('blocked','verified_artifact_required')
+        if action=='submit' and not self._submission_valid(intent): return result('blocked','public_verified_artifact_required')
         if not approved and mode=='approve' and action!='vote':
             return result('queued','manual_review',queue_id=self.db.queue(data,'manual_review'))
         if action=='vote':

@@ -52,6 +52,9 @@ class Database:
             data=json.loads(row[0])
             total += int(data.get('prompt_tokens') or 0) + int(data.get('output_tokens') or 0)
         return total
+    def last_event(self,kind):
+        with self.connect() as c: row=c.execute('SELECT * FROM events WHERE kind=? ORDER BY id DESC LIMIT 1',(kind,)).fetchone()
+        return dict(row)|{'data':json.loads(row['data'])} if row else None
     def queue(self,intent,reason):
         clean=redact(intent,self.secrets); fp=fingerprint(clean)
         with self.connect() as c:

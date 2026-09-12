@@ -8,7 +8,7 @@ import secrets
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -112,6 +112,14 @@ def create_app(settings=None, db=None):
         db.log('settings_changed', {'mode': mode})
         return RedirectResponse('/settings', 303)
 
+    @app.get('/healthz')
+    async def healthz():
+        try:
+            db.get_setting('mode', settings.mode)
+            return JSONResponse({'status':'ok'})
+        except Exception:
+            return JSONResponse({'status':'error'}, status_code=503)
+
     @app.post('/persona')
     async def save_persona(request: Request, user=Depends(authenticate)):
         form = await form_data(request, user)
@@ -204,7 +212,12 @@ def create_app(settings=None, db=None):
         elif page == 'persona':
             events = db.events(kind='persona_version', limit=100)
         pending = db.queue_items(status='pending')
-        context = {'request': request, 'page': page, 'pages': PAGES, 'title': PAGES[page], 'csrf': csrf_token(user), 'events': safe(events), 'pending': safe(pending), 'mode': db.get_setting('mode', settings.mode), 'persona': safe(db.get_setting('persona', '')), 'content_prompt': safe(db.get_setting('content_prompt', '')), 'handle': getattr(settings, 'handle', ''), 'model': getattr(settings, 'ollama_model', ''), 'has_key': bool(settings.api_key), 'payout_address': getattr(settings, 'payout_address', ''), 'wallet_preimage': safe(db.get_setting('payout_wallet_preimage')), 'wallet_submission': db.get_setting('payout_wallet_submission')}
+        import time
+        last_cycle=db.last_event('cycle'); now=time.time()
+        limits={'hour':getattr(settings,'llm_hourly_tokens',0),'day':getattr(settings,'llm_daily_tokens',0),'week':getattr(settings,'llm_weekly_tokens',0)}
+        usage={'hour':db.llm_tokens_since(now-3600),'day':db.llm_tokens_since(now-86400),'week':db.llm_tokens_since(now-7*86400)}
+        budget={key:{'used':usage[key],'limit':limits[key],'remaining':max(0,limits[key]-usage[key]) if limits[key] else None} for key in limits}
+        context = {'request': request, 'page': page, 'pages': PAGES, 'title': PAGES[page], 'csrf': csrf_token(user), 'events': safe(events), 'pending': safe(pending), 'mode': db.get_setting('mode', settings.mode), 'persona': safe(db.get_setting('persona', '')), 'content_prompt': safe(db.get_setting('content_prompt', '')), 'handle': getattr(settings, 'handle', ''), 'model': getattr(settings, 'ollama_model', ''), 'has_key': bool(settings.api_key), 'payout_address': getattr(settings, 'payout_address', ''), 'wallet_preimage': safe(db.get_setting('payout_wallet_preimage')), 'wallet_submission': db.get_setting('payout_wallet_submission'), 'budget':budget, 'last_cycle':safe(last_cycle), 'worker_stale':not last_cycle or now-last_cycle['created_at']>max(180,getattr(settings,'cycle_seconds',900)*2+60)}
         return templates.TemplateResponse(request=request, name='panel.html', context=context)
 
     return app

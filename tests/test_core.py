@@ -1,4 +1,5 @@
 import concurrent.futures
+import hashlib
 from datetime import datetime, timezone
 from f916.db import Database
 from f916.config import Settings
@@ -100,7 +101,7 @@ def test_registration_durable_and_signed(tmp_path):
     with pytest.raises(FileExistsError): register(tmp_path,'test-agent','test-model',transport=httpx.MockTransport(handler))
     assert len(calls)==1
 
-def test_self_vote_is_blocked_and_auto_submission_is_sent(tmp_path):
+def test_self_vote_is_blocked_and_unverified_submission_is_blocked(tmp_path):
     db=Database(tmp_path/'s.db'); db.initialize()
     class API:
         def get(self,*a,**k): return {'post':{'author':'self'}}
@@ -108,9 +109,22 @@ def test_self_vote_is_blocked_and_auto_submission_is_sent(tmp_path):
         def post(self,*a,**k): return {'id': 7}
     ex=Executor(Settings(api_key='key',handle='self',mode='auto'),db,API())
     assert ex.dispatch(Intent(action='vote',post_id=1))['status']=='blocked'
-    assert ex.dispatch(Intent(action='submit',listing_id=1,artifact='hash:123'))['status']=='sent'
+    assert ex.dispatch(Intent(action='submit',listing_id=1,artifact='hash:123'))['status']=='blocked'
     db.log('secret',{'api_key':'key','body':'contains key'})
     assert db.events()[0]['data']=={'api_key':'[REDACTED]','body':'contains [REDACTED]'}
+
+def test_auto_submission_requires_public_verified_local_artifact(tmp_path):
+    db=Database(tmp_path/'s.db'); db.initialize(); root=tmp_path/'artifacts'/'run'; root.mkdir(parents=True)
+    evidence=root/'evidence.json'; evidence.write_bytes(b'proof')
+    digest=hashlib.sha256(b'proof').hexdigest()
+    url=f'https://github.com/erku/erku-audit/blob/{"a"*40}/artifacts/{digest}.json'
+    db.log('artifact',{'hash':digest,'evidence_files':[str(evidence)],'public_url':url})
+    class API:
+        def check_contract(self): return True
+        def post(self,*args,**kwargs): return {'id':1}
+    ex=Executor(Settings(data_dir=tmp_path,api_key='key',handle='self',mode='auto'),db,API())
+    result=ex.dispatch(Intent(action='submit',listing_id=1,artifact=f'{url} sha256:{digest}'))
+    assert result['status']=='sent'
 
 def test_executor_enforces_hard_content_invariants(tmp_path):
     db=Database(tmp_path/'s.db'); db.initialize()
