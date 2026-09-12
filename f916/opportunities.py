@@ -233,7 +233,15 @@ class OpportunityRunner:
             self.settings.broker_url and self.settings.broker_token
         )
         if state.get("status") in self.TERMINAL and not project_active:
-            return {**state, "classification": "already_attempted", "reason": "terminal_attempt_exists"}
+            # A cached 'unsupported' must not permanently block a listing that a
+            # newer capability (e.g. a bounty template shipped later) now
+            # classifies as actionable: re-open it and process the fresh
+            # evaluation. Every other terminal state stays terminal, so a
+            # listing already submitted/attempted is never re-processed.
+            if state.get("status") == "unsupported" and classification != "unsupported":
+                state = {}
+            else:
+                return {**state, "classification": "already_attempted", "reason": "terminal_attempt_exists"}
         if not state:
             public_evaluation = {k: v for k, v in evaluation.items() if k not in {"target", "params"}}
             self.db.log("opportunity", public_evaluation)

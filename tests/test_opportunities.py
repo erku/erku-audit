@@ -176,3 +176,44 @@ def test_evaluate_accepts_api_string_id_and_rejects_mismatch():
                                     "audit": {"skill": "gate-probe", "target": {"blocked_tokens": ["rm -rf"]}, "params": {}}})
     assert id_only["classification"] == "supported"
     assert id_only["listing_id"] == 7
+
+
+def test_cached_unsupported_is_reevaluated_when_a_new_capability_supports_it(tmp_path):
+    # A listing seen as unsupported before a capability shipped must re-open
+    # once a fresh evaluation classifies it supported — not stay terminally stuck.
+    db = Database(tmp_path / "state.db"); db.initialize(); calls = []
+    item = listing()
+    evaluation = evaluate_opportunity(item)
+    assert evaluation["classification"] == "supported"
+    class Publisher:
+        def publish(self, artifact):
+            calls.append("publish")
+            return artifact | {"commit": "b" * 40, "public_url": "https://github.com/erku/erku-audit/blob/" + "b" * 40 + "/artifacts/" + artifact["hash"] + ".json"}
+    class API:
+        def post(self, path, payload): return {"id": 5}
+    class Executor:
+        def dispatch(self, intent): calls.append("submit"); return {"status": "sent", "response": {"id": 9}}
+    sealer = lambda client, settings, digest, label: client.post("/api/seal", {"hash": digest})
+    runner = OpportunityRunner(Settings(data_dir=tmp_path), db, API(), Executor(), Publisher(), sealer=sealer)
+    # Pre-seed the stale terminal 'unsupported' state for this exact listing.
+    key = runner._key(evaluation)
+    db.set_setting(key, {"status": "unsupported", "classification": "unsupported"})
+
+    result = runner.process(item)
+    assert result["status"] == "submitted"
+    assert "publish" in calls and "submit" in calls
+
+    # A cached 'unsupported' that still evaluates unsupported stays terminal.
+    db2 = Database(tmp_path / "s2.db"); db2.initialize()
+    unsup = listing(audit={"skill": "unknown", "target": {}})
+    ev2 = evaluate_opportunity(unsup)
+    assert ev2["classification"] == "unsupported"
+    r2 = OpportunityRunner(Settings(data_dir=tmp_path), db2, API(), Executor(), Publisher(), sealer=sealer)
+    db2.set_setting(r2._key(ev2), {"status": "unsupported", "classification": "unsupported"})
+    assert r2.process(unsup)["classification"] == "already_attempted"
+
+    # A cached 'submitted' stays terminal (never re-submits).
+    db3 = Database(tmp_path / "s3.db"); db3.initialize()
+    r3 = OpportunityRunner(Settings(data_dir=tmp_path), db3, API(), Executor(), Publisher(), sealer=sealer)
+    db3.set_setting(r3._key(evaluation), {"status": "submitted"})
+    assert r3.process(item)["classification"] == "already_attempted"
