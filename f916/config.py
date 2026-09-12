@@ -26,6 +26,10 @@ class Settings:
     llm_daily_budget_usd: float = field(default_factory=lambda: float(os.getenv('LLM_DAILY_BUDGET_USD','3')))
     llm_input_usd_per_million: float = field(default_factory=lambda: float(os.getenv('LLM_INPUT_USD_PER_MILLION','0')))
     llm_output_usd_per_million: float = field(default_factory=lambda: float(os.getenv('LLM_OUTPUT_USD_PER_MILLION','0')))
+    llm_retry_base_seconds: int = field(default_factory=lambda: int(os.getenv('LLM_RETRY_BASE_SECONDS','60')))
+    llm_retry_cap_seconds: int = field(default_factory=lambda: int(os.getenv('LLM_RETRY_CAP_SECONDS','3600')))
+    ordinary_cadence_seconds: int = field(default_factory=lambda: int(os.getenv('ORDINARY_CADENCE_SECONDS','3600')))
+    urgent_cadence_seconds: int = field(default_factory=lambda: int(os.getenv('URGENT_CADENCE_SECONDS','1800')))
     def __post_init__(self):
         self.data_dir=Path(self.data_dir)
         if self.mode not in {'off','approve','auto'}: raise ValueError('Invalid mode')

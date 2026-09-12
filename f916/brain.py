@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from defense.ingest import wrap_untrusted
 from invariants import check_intent, redact
+from . import recovery
 from .models import Intent
 
 
@@ -135,6 +136,13 @@ class Brain:
             self.db.log("llm", {"status":"blocked", "reason":"daily_usd_budget", "projected_usd":projected})
             self.last_status = "blocked"
             return []
+        now = time.time()
+        retry_state = self.db.get_setting("llm_retry_state", {})
+        if recovery.is_blocked(retry_state, now):
+            self.db.log("llm", {"status":"rate_limited", "reason":"ollama_retry_pending",
+                                "blocked_until":retry_state["blocked_until"]})
+            self.last_status = "rate_limited"
+            return []
         started = time.monotonic()
         try:
             response = self.session.post("/api/chat", json=payload)
@@ -142,12 +150,30 @@ class Brain:
             result = response.json()
             content = result.get("message", {}).get("content", "")
             parsed = _parse_object(content)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (429, 503):
+                retry_epoch = recovery.parse_retry_after(exc.response.headers.get("Retry-After"), now)
+                new_state = recovery.record_rate_limit(retry_state, retry_epoch, now,
+                                                        self.settings.llm_retry_base_seconds,
+                                                        self.settings.llm_retry_cap_seconds)
+                self.db.set_setting("llm_retry_state", new_state)
+                self.db.log("llm", {"status":"rate_limited", "reason":"ollama_retry_pending",
+                                    "blocked_until":new_state["blocked_until"]})
+                self.last_status = "rate_limited"
+                return []
+            self.db.log("llm", {"status":"error", "task":task, "error_type":type(exc).__name__,
+                                "duration":time.monotonic()-started,
+                                "response_preview":redact(locals().get("content", ""))[:500]})
+            self.last_status = "error"
+            return []
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             self.db.log("llm", {"status":"error", "task":task, "error_type":type(exc).__name__,
                                 "duration":time.monotonic()-started,
                                 "response_preview":redact(locals().get("content", ""))[:500]})
             self.last_status = "error"
             return []
+        if self.db.get_setting("llm_retry_state"):
+            self.db.set_setting("llm_retry_state", {})
         prompt_tokens = int(result.get("prompt_eval_count") or 0)
         output_tokens = int(result.get("eval_count") or 0)
         cost = (prompt_tokens*self.settings.llm_input_usd_per_million + output_tokens*self.settings.llm_output_usd_per_million)/1_000_000

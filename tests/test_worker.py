@@ -1,4 +1,5 @@
 import json
+import time
 import httpx
 
 from f916.config import Settings
@@ -171,3 +172,88 @@ def test_cycle_does_not_ack_or_commit_snapshot_when_llm_is_blocked(tmp_path):
     result=Worker(Settings(data_dir=tmp_path,api_key='key'),db,API(),Brain()).cycle()
     assert not result['processed'] and '/api/me/ack' not in posts
     assert db.get_setting('snapshot_hash') is None
+
+
+def test_cycle_ordinary_cadence_is_one_hour_not_three(tmp_path):
+    """Guards the hourly triage cadence: a last-ok triage 4000s ago (>1h,
+    <3h) must NOT throttle under the new default, though it would have
+    under the old 10800s (3h) constant."""
+    from f916.loop import Worker
+    db = Database(tmp_path / "state.db"); db.initialize()
+    db.log("llm", {"status": "ok", "task": "triage"})
+    with db.connect() as c:
+        c.execute("UPDATE events SET created_at=? WHERE kind='llm'", (time.time() - 4000,))
+
+    class API:
+        def get(self, path, params=None):
+            if path == "/api/front":
+                return {"posts": [{"id": 1, "author": "a", "title": "t", "body": "evidence body"}]}
+            return {}
+
+    class Brain:
+        calls = 0
+        last_status = "ok"
+        def decide(self, snapshot, task="triage"):
+            self.calls += 1
+            return []
+
+    brain = Brain()
+    result = Worker(Settings(data_dir=tmp_path), db, API(), brain).cycle()
+    assert result["changed"] and result.get("processed")
+    assert brain.calls == 1
+    assert not any(e["data"].get("status") == "throttled" for e in db.events("cycle"))
+
+
+def test_brain_short_circuits_when_retry_state_blocks(tmp_path):
+    from f916.brain import Brain
+    called = False
+    def handler(request):
+        nonlocal called; called = True
+        return httpx.Response(200, json={"message": {"content": '{"intents":[]}'},
+                                         "prompt_eval_count": 1, "eval_count": 1})
+    db = Database(tmp_path / "state.db"); db.initialize()
+    db.set_setting("llm_retry_state", {"attempts": 1, "blocked_until": time.time() + 30, "last": time.time()})
+    brain = Brain(Settings(data_dir=tmp_path), db, transport=httpx.MockTransport(handler))
+    assert brain.decide({"items": []}) == []
+    assert not called
+    assert brain.last_status == "rate_limited"
+    assert db.events("llm")[0]["data"]["status"] == "rate_limited"
+
+
+def test_brain_persists_retry_after_header_on_429(tmp_path):
+    from f916.brain import Brain
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "30"})
+    db = Database(tmp_path / "state.db"); db.initialize()
+    before = time.time()
+    brain = Brain(Settings(data_dir=tmp_path), db, transport=httpx.MockTransport(handler))
+    assert brain.decide({"items": []}) == []
+    assert brain.last_status == "rate_limited"
+    state = db.get_setting("llm_retry_state")
+    assert state["attempts"] == 1
+    assert abs(state["blocked_until"] - (before + 30)) < 5
+
+
+def test_brain_bounds_backoff_when_429_has_no_retry_after(tmp_path):
+    from f916.brain import Brain
+    def handler(request):
+        return httpx.Response(429)
+    db = Database(tmp_path / "state.db"); db.initialize()
+    settings = Settings(data_dir=tmp_path, llm_retry_base_seconds=60, llm_retry_cap_seconds=120)
+    before = time.time()
+    brain = Brain(settings, db, transport=httpx.MockTransport(handler))
+    assert brain.decide({"items": []}) == []
+    state = db.get_setting("llm_retry_state")
+    assert 60 <= state["blocked_until"] - before <= 120
+
+
+def test_brain_clears_retry_state_after_later_success(tmp_path):
+    from f916.brain import Brain
+    def handler(request):
+        return httpx.Response(200, json={"message": {"content": '{"intents":[]}'},
+                                         "prompt_eval_count": 1, "eval_count": 1})
+    db = Database(tmp_path / "state.db"); db.initialize()
+    db.set_setting("llm_retry_state", {"attempts": 2, "blocked_until": time.time() - 10, "last": time.time() - 100})
+    brain = Brain(Settings(data_dir=tmp_path), db, transport=httpx.MockTransport(handler))
+    assert brain.decide({"items": []}) == []
+    assert db.get_setting("llm_retry_state") == {}

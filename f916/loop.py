@@ -142,7 +142,7 @@ class Worker:
             return {"changed":False}
         last_ok=next((event for event in self.db.events('llm',1000) if event['data'].get('status')=='ok' and event['data'].get('task')=='triage'),None)
         urgent=any(item.get('bucket')!='in_threads_you_joined' for item in snapshot['inbox'])
-        minimum_interval=1800 if urgent else 10800
+        minimum_interval=getattr(self.settings,'urgent_cadence_seconds',1800) if urgent else getattr(self.settings,'ordinary_cadence_seconds',3600)
         if last_ok and time.time()-last_ok['created_at'] < minimum_interval:
             self.db.log('cycle',{'status':'throttled','snapshot_hash':digest,'urgent':urgent,'retry_after_seconds':int(minimum_interval-(time.time()-last_ok['created_at']))})
             return {'changed':True,'processed':False,'throttled':True}
