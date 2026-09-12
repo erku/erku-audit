@@ -18,7 +18,7 @@ class Settings:
     dashboard_password: str = field(default_factory=lambda: os.getenv('DASHBOARD_PASSWORD',''), repr=False)
     payout_address: str = field(default_factory=lambda: os.getenv('PAYOUT_ADDRESS',''))
     github_repo: str = field(default_factory=lambda: os.getenv('GITHUB_REPO','erku/erku-audit'))
-    cycle_seconds: int = field(default_factory=lambda: int(os.getenv('CYCLE_SECONDS','900')))
+    cycle_seconds: int = field(default_factory=lambda: int(os.getenv('CYCLE_SECONDS','300')))
     llm_daily_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_DAILY_TOKENS','100000')))
     llm_hourly_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_HOURLY_TOKENS','30000')))
     llm_weekly_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_WEEKLY_TOKENS','500000')))
