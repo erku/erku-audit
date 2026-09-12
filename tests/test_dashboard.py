@@ -104,3 +104,15 @@ def test_health_and_budget_status_are_visible(panel):
     page=client.get('/settings',auth=('admin','test-password'))
     assert page.status_code == 200
     assert 'Stan workera i budżet Ollama' in page.text
+
+
+def test_token_limit_toggle_is_persisted(panel):
+    client,db=panel; auth=('admin','test-password'); csrf=token(client)
+    response=client.post('/settings/token-limits',auth=auth,data={'token_limits_form':'1','enabled':'true','csrf':csrf})
+    assert response.status_code==200 and db.get_setting('llm_token_limits_enabled') is True
+    csrf=token(client)
+    response=client.post('/settings',auth=auth,data={'mode':'auto','csrf':csrf})
+    assert response.status_code==200 and db.get_setting('llm_token_limits_enabled') is True
+    csrf=token(client)
+    response=client.post('/settings/token-limits',auth=auth,data={'token_limits_form':'1','csrf':csrf})
+    assert response.status_code==200 and db.get_setting('llm_token_limits_enabled') is False

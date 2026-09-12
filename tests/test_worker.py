@@ -67,7 +67,7 @@ def test_brain_blocks_before_exceeding_usd_budget(tmp_path):
         nonlocal called; called=True
         return httpx.Response(500)
     db=Database(tmp_path/'state.db'); db.initialize()
-    settings=Settings(data_dir=tmp_path,llm_daily_budget_usd=0.000001,
+    settings=Settings(data_dir=tmp_path,llm_daily_budget_usd=0.000001,llm_token_limits_enabled=True,
                       llm_input_usd_per_million=1,llm_output_usd_per_million=1)
     assert Brain(settings,db,transport=httpx.MockTransport(handler)).decide({"items":[]})==[]
     assert not called
@@ -80,10 +80,22 @@ def test_brain_blocks_before_exceeding_hourly_token_budget(tmp_path):
         nonlocal called; called=True
         return httpx.Response(500)
     db=Database(tmp_path/'state.db'); db.initialize()
-    settings=Settings(data_dir=tmp_path,llm_hourly_tokens=1)
+    settings=Settings(data_dir=tmp_path,llm_hourly_tokens=1,llm_token_limits_enabled=True)
     assert Brain(settings,db,transport=httpx.MockTransport(handler)).decide({'items':[]})==[]
     assert not called
     assert db.events('llm')[0]['data']['reason']=='hourly_token_budget'
+
+def test_brain_ignores_configured_caps_when_limits_are_disabled(tmp_path):
+    from f916.brain import Brain
+    called=False
+    def handler(request):
+        nonlocal called; called=True
+        return httpx.Response(200,json={'message':{'content':'{"intents":[]}'},'prompt_eval_count':2,'eval_count':1})
+    db=Database(tmp_path/'state.db'); db.initialize()
+    settings=Settings(data_dir=tmp_path,llm_hourly_tokens=1,llm_daily_tokens=1,
+                      llm_weekly_tokens=1,llm_daily_budget_usd=0,llm_token_limits_enabled=False)
+    assert Brain(settings,db,transport=httpx.MockTransport(handler)).decide({'items':[]})==[]
+    assert called
 
 
 def test_cycle_skips_llm_when_snapshot_unchanged_and_quarantines_per_item(tmp_path):

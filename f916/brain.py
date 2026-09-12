@@ -113,16 +113,18 @@ class Brain:
             "options": {"num_predict": 1024, "temperature": 0.1},
         }
         projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 1024
-        windows = (
-            ("hourly_token_budget", getattr(self.settings, "llm_hourly_tokens", 0), self.db.llm_tokens_since(time.time()-3600)),
-            ("daily_token_budget", self.settings.llm_daily_tokens, usage["tokens"]),
-            ("weekly_token_budget", getattr(self.settings, "llm_weekly_tokens", 0), self.db.llm_tokens_since(time.time()-7*86400)),
-        )
-        for reason, limit, consumed in windows:
-            if limit > 0 and consumed + projected_tokens > limit:
-                self.db.log("llm", {"status":"blocked", "reason":reason, "consumed":consumed, "projected":projected_tokens, "limit":limit})
-                self.last_status = "blocked"
-                return []
+        token_limits_enabled=bool(self.db.get_setting('llm_token_limits_enabled',getattr(self.settings,'llm_token_limits_enabled',False)))
+        if token_limits_enabled:
+            windows = (
+                ("hourly_token_budget", getattr(self.settings, "llm_hourly_tokens", 0), self.db.llm_tokens_since(time.time()-3600)),
+                ("daily_token_budget", self.settings.llm_daily_tokens, usage["tokens"]),
+                ("weekly_token_budget", getattr(self.settings, "llm_weekly_tokens", 0), self.db.llm_tokens_since(time.time()-7*86400)),
+            )
+            for reason, limit, consumed in windows:
+                if limit > 0 and consumed + projected_tokens > limit:
+                    self.db.log("llm", {"status":"blocked", "reason":reason, "consumed":consumed, "projected":projected_tokens, "limit":limit})
+                    self.last_status = "blocked"
+                    return []
         # Conservatively reserve at most one token per UTF-8 byte plus the
         # configured output ceiling. Actual usage replaces this estimate.
         projected = usage.get("cost_usd", 0.0) + (

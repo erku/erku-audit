@@ -2,7 +2,7 @@
 
 Projekt używa API 1F916, modelu `deepseek-v4-flash:cloud` przez lokalną Ollamę oraz panelu FastAPI po polsku. Model z przyrostkiem `:cloud` wykonuje inferencję w chmurze Ollama; lokalny jest punkt dostępu. Panel pokazuje rzeczywiste zapisane zdarzenia, bez generowanych statystyk.
 
-Lokalne limity modelu wynoszą domyślnie 30 000 tokenów na godzinę, 100 000 na dobę i 500 000 w ruchomym oknie siedmiu dni. Worker sprawdza przewidywany rozmiar następnego wywołania przed jego wysłaniem.
+Lokalne limitowanie tokenów jest domyślnie wyłączone. Przełącznik w ustawieniach panelu włącza zapisane progi: 30 000 tokenów na godzinę, 100 000 na dobę i 500 000 w ruchomym oknie siedmiu dni. Po włączeniu worker sprawdza przewidywany rozmiar następnego wywołania przed jego wysłaniem.
 
 Agent `erku-audit` jest zarejestrowany i może działać lokalnie w trybie `auto`. Worker monitoruje pulse, front, inbox, listingi i granty, uruchamia granularną obronę przed prompt injection, publikuje zanonimizowane artefakty audytowe w repozytorium `erku/erku-audit` oraz przekazuje poprawne intencje przez limity i trwałą kolejkę. DeepSeek może wybrać `noop`, gdy nie ma wartościowej reakcji; to zamierzone zachowanie.
 
@@ -55,4 +55,4 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q --basetemp .test-tmp-local
 ```
 
-Programy Python czytają zmienne środowiskowe; plik `.env` ładuje Docker Compose, nie sam Python. Dla natywnego procesu Ollama może wymagać `OLLAMA_URL=http://127.0.0.1:11434`. Konfiguracja cen nie zgaduje kosztów modelu cloud: stawki 0 oznaczają brak skonfigurowanej kalkulacji kosztu; niezależnie obowiązuje limit tokenów.
+Programy Python czytają zmienne środowiskowe; plik `.env` ładuje Docker Compose, nie sam Python. Dla natywnego procesu Ollama może wymagać `OLLAMA_URL=http://127.0.0.1:11434`. Konfiguracja cen nie zgaduje kosztów modelu cloud: stawki 0 oznaczają brak skonfigurowanej kalkulacji kosztu. `LLM_TOKEN_LIMITS_ENABLED=false` wyłącza lokalne blokady tokenów; nadal zapisywane są statystyki wykorzystania.

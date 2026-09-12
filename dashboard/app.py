@@ -112,6 +112,17 @@ def create_app(settings=None, db=None):
         db.log('settings_changed', {'mode': mode})
         return RedirectResponse('/settings', 303)
 
+    @app.post('/settings/token-limits')
+    async def save_token_limits(request: Request, user=Depends(authenticate)):
+        form=await form_data(request,user)
+        if form.get('token_limits_form') != '1': raise HTTPException(422,'Nieprawidłowy formularz')
+        values=form.getlist('enabled')
+        if values not in ([],['true']): raise HTTPException(422,'Nieprawidłowa wartość przełącznika')
+        enabled=values==['true']
+        db.set_setting('llm_token_limits_enabled',enabled)
+        db.log('settings_changed',{'llm_token_limits_enabled':enabled})
+        return RedirectResponse('/settings',303)
+
     @app.get('/healthz')
     async def healthz():
         try:
@@ -217,7 +228,7 @@ def create_app(settings=None, db=None):
         limits={'hour':getattr(settings,'llm_hourly_tokens',0),'day':getattr(settings,'llm_daily_tokens',0),'week':getattr(settings,'llm_weekly_tokens',0)}
         usage={'hour':db.llm_tokens_since(now-3600),'day':db.llm_tokens_since(now-86400),'week':db.llm_tokens_since(now-7*86400)}
         budget={key:{'used':usage[key],'limit':limits[key],'remaining':max(0,limits[key]-usage[key]) if limits[key] else None} for key in limits}
-        context = {'request': request, 'page': page, 'pages': PAGES, 'title': PAGES[page], 'csrf': csrf_token(user), 'events': safe(events), 'pending': safe(pending), 'mode': db.get_setting('mode', settings.mode), 'persona': safe(db.get_setting('persona', '')), 'content_prompt': safe(db.get_setting('content_prompt', '')), 'handle': getattr(settings, 'handle', ''), 'model': getattr(settings, 'ollama_model', ''), 'has_key': bool(settings.api_key), 'payout_address': getattr(settings, 'payout_address', ''), 'wallet_preimage': safe(db.get_setting('payout_wallet_preimage')), 'wallet_submission': db.get_setting('payout_wallet_submission'), 'budget':budget, 'last_cycle':safe(last_cycle), 'worker_stale':not last_cycle or now-last_cycle['created_at']>max(180,getattr(settings,'cycle_seconds',900)*2+60)}
+        context = {'request': request, 'page': page, 'pages': PAGES, 'title': PAGES[page], 'csrf': csrf_token(user), 'events': safe(events), 'pending': safe(pending), 'mode': db.get_setting('mode', settings.mode), 'persona': safe(db.get_setting('persona', '')), 'content_prompt': safe(db.get_setting('content_prompt', '')), 'handle': getattr(settings, 'handle', ''), 'model': getattr(settings, 'ollama_model', ''), 'has_key': bool(settings.api_key), 'payout_address': getattr(settings, 'payout_address', ''), 'wallet_preimage': safe(db.get_setting('payout_wallet_preimage')), 'wallet_submission': db.get_setting('payout_wallet_submission'), 'budget':budget, 'llm_token_limits_enabled':db.get_setting('llm_token_limits_enabled',getattr(settings,'llm_token_limits_enabled',False)), 'last_cycle':safe(last_cycle), 'worker_stale':not last_cycle or now-last_cycle['created_at']>max(180,getattr(settings,'cycle_seconds',900)*2+60)}
         return templates.TemplateResponse(request=request, name='panel.html', context=context)
 
     return app

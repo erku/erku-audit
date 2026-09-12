@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 from dataclasses import dataclass, field
 
+def _bool_env(name, default='false'):
+    return os.getenv(name,default).strip().lower() in {'1','true','yes','on'}
+
 @dataclass
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.getenv('DATA_DIR','data')))
@@ -19,6 +22,7 @@ class Settings:
     llm_daily_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_DAILY_TOKENS','100000')))
     llm_hourly_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_HOURLY_TOKENS','30000')))
     llm_weekly_tokens: int = field(default_factory=lambda: int(os.getenv('LLM_WEEKLY_TOKENS','500000')))
+    llm_token_limits_enabled: bool = field(default_factory=lambda: _bool_env('LLM_TOKEN_LIMITS_ENABLED','false'))
     llm_daily_budget_usd: float = field(default_factory=lambda: float(os.getenv('LLM_DAILY_BUDGET_USD','3')))
     llm_input_usd_per_million: float = field(default_factory=lambda: float(os.getenv('LLM_INPUT_USD_PER_MILLION','0')))
     llm_output_usd_per_million: float = field(default_factory=lambda: float(os.getenv('LLM_OUTPUT_USD_PER_MILLION','0')))
