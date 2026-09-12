@@ -53,6 +53,15 @@ def test_attribute_and_update_moves_state_away_on_falling_karma(tmp_path):
     assert alpha == 1.0 and beta == 2.0  # reward 0.0: alpha+=0, beta+=1
 
 
+def test_attribute_and_update_uses_half_reward_when_karma_is_unchanged(tmp_path):
+    db = Database(tmp_path / 's.db'); db.initialize()
+    _log_triage(db, 'leak', karma_snapshot=10, age_hours=100)
+    result = attribute_and_update(db, Settings(data_dir=tmp_path), {'karma': 10})
+    assert result == {'updated': 1, 'skipped': 0}
+    alpha, beta = db.get_setting('bandit_state')['leak']
+    assert (alpha, beta) == (1.5, 1.5)  # reward 0.5: alpha+=0.5, beta+=0.5 from the [1,1] prior
+
+
 def test_attribute_and_update_skips_events_under_72h(tmp_path):
     db = Database(tmp_path / 's.db'); db.initialize()
     _log_triage(db, 'leak', karma_snapshot=10, age_hours=1)

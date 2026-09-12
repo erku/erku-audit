@@ -267,7 +267,7 @@ class Worker:
                     self.db.log("outcome_scan", {"status":"error","error_type":type(exc).__name__})
             try:
                 from f916 import learning
-                me = self._fetch("/api/me", "since_last_visit") if self.settings.api_key else {}
+                me = self._fetch("/api/me", "since_last_visit", params={"cursor_mode":"id"}) if self.settings.api_key else {}
                 self.db.log("learning", learning.attribute_and_update(self.db, self.settings, me))
             except Exception as exc:
                 self.db.log("learning", {"status":"error","error_type":type(exc).__name__})
