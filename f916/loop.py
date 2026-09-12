@@ -19,6 +19,7 @@ from .publisher import Publisher
 from .seal import seal_artifact
 from .payout import PayoutManager
 from .opportunities import OpportunityRunner
+from .audit_program import build_inputs, plan_next_audit
 
 
 def _list(data, key):
@@ -121,6 +122,8 @@ class Worker:
             detail=self._fetch(f"/api/listings/{int(listing['id'])}","submissions")
             economics=detail.get('economics',{}) if isinstance(detail,dict) else {}
             if economics.get('available_award_capacity',1)>0: listing_details.append(detail)
+        # Reused by daily_audit's rotation to build audit inputs without refetching.
+        self._last_listing_details = listing_details
         if self.opportunity_runner:
             for listing in listing_details:
                 try:
@@ -176,23 +179,39 @@ class Worker:
     def daily_audit(self):
         day = time.strftime("%Y-%m-%d", time.gmtime())
         if self.db.get_setting("last_daily_audit") == day: return None
-        artifact = run_skill("self-redteam", {}, {}, Path(self.settings.data_dir)/"artifacts")
+        # Deterministic rotation across meaningful checks (self-redteam,
+        # rail-audit, leak-probe, gate-probe); skills whose inputs are absent
+        # are skipped, self-redteam is the guaranteed fallback.
+        cursor = self.db.get_setting("audit_cursor", 0)
+        inputs = build_inputs(self.client, getattr(self, "_last_listing_details", []))
+        job = plan_next_audit(cursor, inputs)
+        listing_id = job.get("listing_id")
+        binding = {"listing_id": listing_id} if listing_id is not None else None
+        artifact = run_skill(job["skill"], job["target"], job["params"],
+                             Path(self.settings.data_dir)/"artifacts", binding=binding)
         if self.publisher:
             try: artifact = self.publisher.publish(artifact)
             except Exception as exc:
-                self.db.log("publisher", {"status":"error","error_type":type(exc).__name__})
+                # Do not advance the rotation on a publish failure; retry the
+                # same audit next cycle rather than skipping it.
+                self.db.log("publisher", {"status":"error","error_type":type(exc).__name__,"audit":job["label"]})
                 return None
-        if self.db.get_setting('last_published_artifact_hash') == artifact['hash']:
-            self.db.log('artifact_check',{'status':'unchanged','hash':artifact['hash'],'public_url':artifact.get('public_url')})
+        # A listing-specific audit is about live evidence and is always worth
+        # publishing; a generic audit is deduped per type on its content hash.
+        dedup_key = f"last_published_artifact_hash:{job['label']}"
+        if listing_id is None and self.db.get_setting(dedup_key) == artifact['hash']:
+            self.db.log('artifact_check',{'status':'unchanged','audit':job['label'],'hash':artifact['hash'],'public_url':artifact.get('public_url')})
+            self.db.set_setting("audit_cursor", job["cursor_next"])
             self.db.set_setting("last_daily_audit", day)
             return artifact
         try:
-            sealed=seal_artifact(self.client,self.settings,artifact['hash'],'self-redteam')
+            sealed=seal_artifact(self.client,self.settings,artifact['hash'],job['label'])
             artifact['seal_id']=sealed.get('id')
         except Exception as exc:
-            self.db.log("seal", {"status":"error","error_type":type(exc).__name__,"hash":artifact['hash']})
+            self.db.log("seal", {"status":"error","error_type":type(exc).__name__,"hash":artifact['hash'],"audit":job['label']})
         self.db.log("artifact", artifact)
-        self.db.set_setting('last_published_artifact_hash',artifact['hash'])
+        self.db.set_setting(dedup_key, artifact['hash'])
+        self.db.set_setting("audit_cursor", job["cursor_next"])
         self.db.set_setting("last_daily_audit", day)
         prompt = {"artifact":artifact, "instruction":"Draft at most one evidence-first post. Include exact hash and limitations."}
         for intent in self.brain.decide(prompt, "post_of_the_day"):

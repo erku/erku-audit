@@ -257,3 +257,47 @@ def test_brain_clears_retry_state_after_later_success(tmp_path):
     brain = Brain(Settings(data_dir=tmp_path), db, transport=httpx.MockTransport(handler))
     assert brain.decide({"items": []}) == []
     assert db.get_setting("llm_retry_state") == {}
+
+
+def test_daily_audit_rotation_advances_cursor_and_dedupes(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "s.db"); db.initialize()
+    class API:
+        def post(self, path, payload=None): return {"id": 1}
+        def get(self, path, params=None): return {}
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a): return []
+    w = Worker(Settings(data_dir=tmp_path, api_key="", handle="self"), db, API(), Brain())
+    w._last_listing_details = []  # no rail/leak/gate inputs -> self-redteam fallback
+    art = w.daily_audit()
+    assert art is not None
+    assert db.get_setting("audit_cursor") == 1
+    assert db.get_setting("last_published_artifact_hash:self-redteam") == art["hash"]
+    assert db.events("artifact")
+    # same UTC day -> no second audit
+    assert w.daily_audit() is None
+    # simulate the next day: only self-redteam is runnable, identical content ->
+    # per-type dedup skips republish and records an unchanged artifact_check.
+    db.set_setting("last_daily_audit", "1970-01-01")
+    art2 = w.daily_audit()
+    assert art2["hash"] == art["hash"]
+    assert any(e["data"].get("status") == "unchanged" for e in db.events("artifact_check"))
+
+
+def test_daily_audit_runs_leak_probe_when_listings_present(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "s.db"); db.initialize()
+    db.set_setting("audit_cursor", 2)  # leak-probe slot
+    class API:
+        def post(self, path, payload=None): return {"id": 1}
+        def get(self, path, params=None): return {}
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a): return []
+    w = Worker(Settings(data_dir=tmp_path, api_key="", handle="self"), db, API(), Brain())
+    w._last_listing_details = [{"listing_id": 5, "title": "Listing", "condition": "Public condition text."}]
+    art = w.daily_audit()
+    assert art is not None
+    assert db.get_setting("last_published_artifact_hash:leak-probe") == art["hash"]
+    assert db.get_setting("audit_cursor") == 3
