@@ -15,6 +15,18 @@ There is no delete route, no visibility-change route, and no route that
 accepts arbitrary git/shell commands. Every mutating route requires the
 `BROKER_TOKEN` bearer and only ever touches repos this broker itself
 created (tracked in a small JSON state file).
+
+DEPLOYMENT CONSTRAINT — single worker process only: the quota check,
+the idempotent-create check, and the publish `has_content` transition
+are all check-then-act sequences guarded by an in-process
+`threading.Lock()` (see `state_lock` in `create_app`). That lock only
+serializes threads within ONE process; it provides no cross-process
+mutual exclusion. Running this app with `uvicorn --workers N` for N>1
+(or any other multi-process arrangement) reintroduces the race the lock
+is meant to close, since two workers could both read the state file,
+both see room under quota, and both create a repo. The broker MUST be
+deployed as a single worker process. No file locking has been added
+because a single-worker deployment makes it unnecessary.
 """
 from __future__ import annotations
 
@@ -35,9 +47,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from broker.github import GitHubClient
-# Reuse Task 4's builder constants so the two modules can never drift
-# apart on what counts as a valid repo name / manifest shape.
+# Reuse Task 4's builder constants (and its tree_hash function) so the
+# two modules can never drift apart on what counts as a valid repo name,
+# a valid manifest shape, or a matching tree_hash. `_tree_hash` is
+# imported (not copy-pasted) precisely because it is the manifest
+# integrity check — a second, independently-maintained copy could
+# silently diverge from the builder's and defeat that check.
 from f916.builder import MANIFEST_VERSION, MAX_FILES, NAME_RE
+from f916.builder import _tree_hash as _builder_tree_hash
 
 MAX_PUBLISH_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB, per brief
 
@@ -99,20 +116,10 @@ def _now_iso() -> str:
 
 
 # --------------------------------------------------------------------------
-# Manifest validation helpers (mirrors f916.builder._tree_hash exactly)
+# Manifest validation helpers
 # --------------------------------------------------------------------------
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _tree_hash(file_hashes: list[tuple[str, str]]) -> str:
-    hasher = hashlib.sha256()
-    for path, digest in sorted(file_hashes, key=lambda item: item[0]):
-        hasher.update(path.encode("utf-8"))
-        hasher.update(b"\x00")
-        hasher.update(digest.encode("utf-8"))
-        hasher.update(b"\n")
-    return hasher.hexdigest()
 
 
 def _is_safe_relative_path(rel_path: str) -> bool:
@@ -171,6 +178,12 @@ class CreateRepoRequest(BaseModel):
 # App factory
 # --------------------------------------------------------------------------
 def create_app(settings: BrokerSettings | None = None, github_client: GitHubClient | None = None) -> FastAPI:
+    # In-process only: this Lock serializes the quota/idempotency/publish
+    # check-then-act sections across threads within THIS process, but
+    # provides no protection across separate processes. The broker MUST
+    # be run single-worker (no `uvicorn --workers N>1`, no multiple
+    # replicas sharing one state file) or the check-then-act sequences
+    # below become racy. See the module docstring.
     state_lock = threading.Lock()
 
     @asynccontextmanager
@@ -278,7 +291,7 @@ def create_app(settings: BrokerSettings | None = None, github_client: GitHubClie
                     raise HTTPException(status_code=422, detail="file content does not match declared hash")
                 recomputed_hashes.append((entry.path, digest))
 
-            if _tree_hash(recomputed_hashes) != manifest.tree_hash:
+            if _builder_tree_hash(recomputed_hashes) != manifest.tree_hash:
                 raise HTTPException(status_code=422, detail="tree_hash mismatch")
 
             default_branch = record.get("default_branch") or "main"

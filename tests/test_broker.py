@@ -227,6 +227,16 @@ def test_publish_tampered_file_rejected(broker):
     assert fake.put_files == []
 
 
+def test_broker_imports_tree_hash_from_builder_not_a_local_copy():
+    """Regression guard for the tree_hash duplication/drift issue: broker/app.py
+    must import f916.builder's _tree_hash (the manifest integrity check) rather
+    than reimplementing it, so the two can never silently diverge."""
+    from f916 import builder as f916_builder
+    from broker import app as broker_app
+
+    assert broker_app._builder_tree_hash is f916_builder._tree_hash
+
+
 def test_publish_tree_hash_mismatch_rejected(broker):
     client, fake, _settings = broker
     client.post("/repos", json={"name": "erku-1f916-demo"}, headers=AUTH)
