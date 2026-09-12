@@ -171,4 +171,32 @@ def rail_derivation_check(listing: dict) -> dict:
     return {"listing_id": listing_id, "economics": economics}
 
 
-BUILDERS = {"rail_self_report": rail_self_report, "rail_derivation_check": rail_derivation_check}
+def batch_cadence(listing: dict) -> dict:
+    """Build the batch-cadence skill TARGET from the listing's OWN id.
+
+    The listing carries no receipts itself -- they are walked live from the
+    public GET /api/payouts feed. `walk: 'payouts'` is a marker for
+    OpportunityRunner.build_artifact to populate `receipts` before running
+    the skill (see opportunities.walk_payout_receipts).
+
+    Raises ValueError('no_listing_id') only when the listing carries no
+    usable id (the caller only calls this after a template matched a real
+    listing)."""
+    if not isinstance(listing, dict):
+        raise ValueError("no_listing_id")
+    listing_id = _identity_int(listing.get("listing_id"))
+    if listing_id is None:
+        listing_id = _identity_int(listing.get("id"))
+    if listing_id is None:
+        raise ValueError("no_listing_id")
+
+    return {
+        "listing_id": listing_id,
+        "window_seconds": 60,
+        "source": "GET https://1f916.ai/api/payouts",
+        "walk": "payouts",
+    }
+
+
+BUILDERS = {"rail_self_report": rail_self_report, "rail_derivation_check": rail_derivation_check,
+            "batch_cadence": batch_cadence}

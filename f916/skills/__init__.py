@@ -1,14 +1,16 @@
 """Fixed deterministic audits. No command strings are executed."""
 import hashlib
 import json
+import math
 import shlex
+import statistics
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qsl
 from invariants import redact
 from defense.regress import run_regression
 
-SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam','rail-report','rail-derivation-check'})
+SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam','rail-report','rail-derivation-check','batch-cadence'})
 
 
 def _gate(target, params):
@@ -134,6 +136,88 @@ def _rail_report(target, params):
     return {'status':'consistent','findings':[],'summary':summary,'quoted':quoted,'verdict':verdict,'source':target.get('source')}
 
 
+def _batch_cadence(target, params):
+    """Deterministic, stranger-checkable settlement-receipt batch cadence.
+
+    `target['receipts']` is a pre-walked list of
+    {'binding_id':int, 'receipt_id':.., 'block_timestamp':num, 'created_at':num}
+    rows from GET /api/payouts (the walk itself lives outside this pure
+    skill -- see opportunities.walk_payout_receipts). Executes nothing;
+    deterministic; never raises.
+
+    Batch definition (documented here so a stranger can reproduce it):
+    normalize each receipt's block_timestamp to seconds (values > 1e12 are
+    treated as milliseconds and divided by 1000); drop receipts without a
+    finite numeric block_timestamp; sort ascending by normalized timestamp,
+    tie-broken by binding_id; then greedily walk the sorted receipts,
+    starting a new cluster whenever a receipt's timestamp is more than
+    `window_seconds` after the PREVIOUS receipt's timestamp. A cluster of
+    size >= 2 is a "batch"; its span_seconds is its last-minus-first
+    timestamp.
+    """
+    receipts = target.get('receipts') if isinstance(target, dict) else None
+    if not isinstance(receipts, list) or not receipts:
+        return {'status': 'inconclusive', 'findings': [],
+                'summary': 'batch-cadence requires a receipts list walked from /api/payouts.'}
+
+    window = target.get('window_seconds', 60)
+    if isinstance(window, bool) or not isinstance(window, (int, float)) or not math.isfinite(window) or window <= 0:
+        window = 60
+
+    normalized = []
+    for row in receipts:
+        if not isinstance(row, dict):
+            continue
+        ts = row.get('block_timestamp')
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+            continue
+        if ts > 1e12:
+            ts = ts / 1000
+        binding_id = row.get('binding_id')
+        normalized.append((ts, binding_id))
+
+    def _sort_key(pair):
+        ts, binding_id = pair
+        if isinstance(binding_id, bool) or not isinstance(binding_id, (int, float)):
+            binding_id = 0
+        return (ts, binding_id)
+    normalized.sort(key=_sort_key)
+
+    receipt_count = len(normalized)
+    clusters, current, prev_ts = [], [], None
+    for ts, binding_id in normalized:
+        if current and (ts - prev_ts) <= window:
+            current.append((ts, binding_id))
+        else:
+            if current:
+                clusters.append(current)
+            current = [(ts, binding_id)]
+        prev_ts = ts
+    if current:
+        clusters.append(current)
+
+    batch_clusters = [c for c in clusters if len(c) >= 2]
+    batch_count = len(batch_clusters)
+    batches = [{'members': [binding_id for _, binding_id in c],
+                'span_seconds': int(c[-1][0] - c[0][0])} for c in batch_clusters]
+
+    if batch_count >= 2:
+        starts = [c[0][0] for c in batch_clusters]
+        diffs = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
+        median = int(round(statistics.median(diffs)))
+        cadence_statement = f"{batch_count} batches, n>=2, median inter-batch interval {median}s"
+    else:
+        cadence_statement = f"fewer than two batches exist, so cadence is not identifiable from this data (n={batch_count})"
+
+    summary = (cadence_statement +
+               f" ({receipt_count} receipts, {batch_count} batches; window {window}s; "
+               f"clusters over transfer block_timestamp).")
+    return {'status': 'consistent', 'findings': [], 'summary': summary,
+            'receipt_count': receipt_count, 'batch_count': batch_count, 'batches': batches,
+            'window_seconds': window, 'cadence_statement': cadence_statement,
+            'source': target.get('source')}
+
+
 def run(skill, target, params, output_dir, binding=None):
     if skill not in SKILLS: raise ValueError('Unsupported skill')
     encoded = json.dumps({'target':target,'params':params}, allow_nan=False).encode()
@@ -144,6 +228,7 @@ def run(skill, target, params, output_dir, binding=None):
     elif skill == 'rail-audit': result = _rail(target,params)
     elif skill == 'rail-report': result = _rail_report(target,params)
     elif skill == 'rail-derivation-check': result = _rail_derivation(target,params)
+    elif skill == 'batch-cadence': result = _batch_cadence(target,params)
     elif skill == 'self-redteam':
         regression = run_regression()
         result = {'status':'findings' if regression['missed'] else 'consistent','summary':'Local deterministic attack corpus regression; not exhaustive security assurance.','findings':regression}

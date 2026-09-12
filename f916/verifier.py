@@ -18,16 +18,21 @@ when in doubt, ABSTAIN.
 from __future__ import annotations
 
 import base64
+import re
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from .opportunities import walk_payout_receipts
+from .skills import _batch_cadence
 from .skills import _leak as _leak_probe
 from .skills import _rail_derivation
 
 VERDICTS = ("PASS", "FAIL", "ABSTAIN")
+
+_BATCH_COUNT_RE = re.compile(r"(\d+)\s+batch(?:es)?", re.IGNORECASE)
 
 
 def _positive_int(value):
@@ -111,6 +116,35 @@ def _evaluate_credential_leak(listing, submission):
             "claim_class": "credential_leak"}
 
 
+def _evaluate_batch_cadence(listing, submission, client):
+    """Conservative batch-cadence claim class: PASS on an exact recomputed
+    match, ABSTAIN otherwise -- NEVER FAIL (prose-derived counts are not a
+    reliable basis for a negative verdict). Recomputes the canonical
+    batch_count by walking the same public /api/payouts feed the worker
+    used (via the shared walk_payout_receipts helper) and running the pure
+    _batch_cadence skill over it, then compares against a strictly-regexed
+    count pulled from the submission's own note/artifact text. Never raises;
+    a failed walk or an unusable client both fall through to ABSTAIN."""
+    if client is None:
+        return _abstain("batch_cadence", "No client available to recompute the canonical batch count.")
+    try:
+        receipts = walk_payout_receipts(client)
+        canonical = _batch_cadence({"receipts": receipts, "window_seconds": 60}, {})
+    except Exception:
+        return _abstain("batch_cadence", "Batch count not reproducible/parseable against /api/payouts; abstaining.")
+    canonical_count = canonical.get("batch_count") if isinstance(canonical, dict) else None
+    if not isinstance(canonical_count, int):
+        return _abstain("batch_cadence", "Batch count not reproducible/parseable against /api/payouts; abstaining.")
+    text = " ".join(str(submission.get(key)) for key in ("note", "artifact")
+                     if isinstance(submission.get(key), str))
+    match = _BATCH_COUNT_RE.search(text)
+    if match and int(match.group(1)) == canonical_count:
+        return {"verdict": "PASS",
+                "basis": f"Recomputed {canonical_count} batches from /api/payouts matches the submission's reported count.",
+                "claim_class": "batch_cadence"}
+    return _abstain("batch_cadence", "Batch count not reproducible/parseable against /api/payouts; abstaining.")
+
+
 def evaluate_submission(listing: dict, submission: dict, client=None) -> dict:
     """Deterministically decide a verdict for ONE submission, or ABSTAIN.
 
@@ -123,6 +157,12 @@ def evaluate_submission(listing: dict, submission: dict, client=None) -> dict:
     try:
         if not isinstance(listing, dict) or not isinstance(submission, dict):
             return _abstain("malformed_input", "Listing or submission was not an object.")
+        # batch_cadence is keyed on the LISTING (title casefold contains
+        # "batch cadence"), not on a submission-declared claim_class -- a
+        # submitter to that listing need not know our internal claim-class
+        # vocabulary for this conservative, PASS-on-match-only check to run.
+        if "batch cadence" in str(listing.get("title", "")).casefold():
+            return _evaluate_batch_cadence(listing, submission, client)
         claim_class = submission.get("claim_class")
         claim_class = claim_class if isinstance(claim_class, str) and claim_class else None
         if claim_class == "economic_identity":

@@ -38,6 +38,61 @@ def _source_hash(listing):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def walk_payout_receipts(client, max_pages=50, max_rows=5000):
+    """Paginate GET /api/payouts via `client`, collecting settled receipts.
+
+    Starts with no cursor; each response carries `bindings` (list),
+    `has_more` (bool) and `next_since_id`; subsequent calls pass
+    `params={'since_id': next_since_id}`. Stops when `has_more` is false or
+    after a hard cap of `max_pages` pages / `max_rows` rows (bounds cost
+    against a misbehaving or very large feed).
+
+    A "receipt" is a payouts row with a non-null `receipt_id` AND a numeric
+    `block_timestamp`; only such rows are collected, as
+    `{'binding_id': row['id'], 'receipt_id':.., 'block_timestamp':..,
+    'created_at':..}`.
+
+    Factored out as a small, independently testable helper (fake-client
+    friendly) so it can be reused unchanged by both
+    OpportunityRunner.build_artifact and the batch_cadence verifier claim
+    class. Tolerates any client error by returning whatever was collected so
+    far (often `[]`); never raises.
+    """
+    receipts = []
+    since_id = None
+    try:
+        for _ in range(max_pages):
+            params = {"since_id": since_id} if since_id is not None else None
+            response = client.get("/api/payouts", params=params)
+            if not isinstance(response, dict):
+                break
+            bindings = response.get("bindings")
+            if isinstance(bindings, list):
+                for row in bindings:
+                    if not isinstance(row, dict):
+                        continue
+                    receipt_id = row.get("receipt_id")
+                    block_timestamp = row.get("block_timestamp")
+                    if receipt_id is None:
+                        continue
+                    if isinstance(block_timestamp, bool) or not isinstance(block_timestamp, (int, float)):
+                        continue
+                    receipts.append({
+                        "binding_id": row.get("id"),
+                        "receipt_id": receipt_id,
+                        "block_timestamp": block_timestamp,
+                        "created_at": row.get("created_at"),
+                    })
+                    if len(receipts) >= max_rows:
+                        return receipts
+            if not response.get("has_more"):
+                break
+            since_id = response.get("next_since_id")
+    except Exception:
+        pass
+    return receipts
+
+
 def _identity_int(value):
     """Extract a positive int identity from an int, a numeric string, or the
     API's ``"listing-<n>"`` resource-id form. Returns None on anything else."""
@@ -155,7 +210,15 @@ class OpportunityRunner:
             "source_hash": evaluation["source_hash"],
             "source_payload_hash": listing.get("payload_hash"),
         }
-        return run_skill(evaluation["skill"], evaluation["target"], evaluation["params"],
+        target = evaluation["target"]
+        if isinstance(target, dict) and target.get("walk") == "payouts":
+            # This template's target has no receipts of its own -- populate
+            # them from a live walk of the public payouts feed. Any other
+            # (non-walk) template's target is passed through unchanged.
+            target = {**target}
+            target["receipts"] = walk_payout_receipts(self.client)
+            del target["walk"]
+        return run_skill(evaluation["skill"], target, evaluation["params"],
                          Path(self.settings.data_dir) / "artifacts", binding=binding)
 
     def process(self, listing):

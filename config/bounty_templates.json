@@ -6,5 +6,7 @@
   {"id":"rail-false-number","skill":"rail-derivation-check","builder":"rail_derivation_check",
    "title_contains":["false number"]},
   {"id":"break-the-rail","skill":"rail-derivation-check","builder":"rail_derivation_check",
-   "title_contains":["break","rail"]}
+   "title_contains":["break","rail"]},
+  {"id":"batch-cadence","skill":"batch-cadence","builder":"batch_cadence",
+   "title_contains":["batch cadence"]}
 ]

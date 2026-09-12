@@ -127,6 +127,86 @@ def test_evaluate_submission_credential_leak_fails_only_when_listing_requires_no
     assert decision["verdict"] == "ABSTAIN"
 
 
+def batch_cadence_listing(**updates):
+    base = {
+        "listing_id": 33,
+        "title": "Turbo: measure settlement batch cadence from payouts",
+        "max_verifiers": 1,
+        "verifier_price_atomic": 100000,
+        "submissions": [],
+    }
+    return base | updates
+
+
+def make_payouts_client(bindings, has_more=False, next_since_id=None):
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+        def get(self, path, params=None):
+            self.calls.append((path, params))
+            assert path == "/api/payouts"
+            return {"bindings": bindings, "has_more": has_more, "next_since_id": next_since_id}
+        def post(self, path, payload):
+            raise AssertionError("verifier must never POST")
+    return FakeClient()
+
+
+# Two clusters -> canonical batch_count == 2 (see the equivalent skills test).
+_TWO_BATCH_BINDINGS = [
+    {"id": 1, "receipt_id": "r1", "block_timestamp": 100, "created_at": 1, "handle": "a"},
+    {"id": 2, "receipt_id": "r2", "block_timestamp": 110, "created_at": 2, "handle": "a"},
+    {"id": 3, "receipt_id": "r3", "block_timestamp": 130, "created_at": 3, "handle": "a"},
+    {"id": 4, "receipt_id": "r4", "block_timestamp": 400, "created_at": 4, "handle": "a"},
+    {"id": 5, "receipt_id": "r5", "block_timestamp": 405, "created_at": 5, "handle": "a"},
+]
+
+
+def test_evaluate_submission_batch_cadence_pass_when_claimed_count_matches():
+    client = make_payouts_client(_TWO_BATCH_BINDINGS)
+    submission = {"id": 1, "handle": "someone", "note": "I found 2 batches in the payouts feed."}
+    decision = evaluate_submission(batch_cadence_listing(), submission, client=client)
+    assert decision == {"verdict": "PASS", "basis": decision["basis"], "claim_class": "batch_cadence"}
+    assert "2" in decision["basis"]
+    assert client.calls  # actually recomputed, not trusted blindly
+
+
+def test_evaluate_submission_batch_cadence_abstains_on_mismatch_or_unparseable():
+    client = make_payouts_client(_TWO_BATCH_BINDINGS)
+
+    mismatch = {"id": 2, "handle": "someone", "note": "I counted 5 batches total."}
+    decision = evaluate_submission(batch_cadence_listing(), mismatch, client=client)
+    assert decision["verdict"] == "ABSTAIN"
+    assert decision["claim_class"] == "batch_cadence"
+
+    unparseable = {"id": 3, "handle": "someone", "note": "looks batchy to me, trust me"}
+    decision = evaluate_submission(batch_cadence_listing(), unparseable, client=client)
+    assert decision["verdict"] == "ABSTAIN"
+
+
+def test_evaluate_submission_batch_cadence_abstains_without_client():
+    submission = {"id": 4, "handle": "someone", "note": "2 batches"}
+    decision = evaluate_submission(batch_cadence_listing(), submission, client=None)
+    assert decision["verdict"] == "ABSTAIN"
+    assert decision["claim_class"] == "batch_cadence"
+
+
+def test_evaluate_submission_batch_cadence_never_fails_on_walk_error():
+    class BrokenClient:
+        def get(self, path, params=None):
+            raise RuntimeError("boom")
+        def post(self, path, payload):
+            raise AssertionError("verifier must never POST")
+    submission = {"id": 5, "handle": "someone", "note": "2 batches"}
+    decision = evaluate_submission(batch_cadence_listing(), submission, client=BrokenClient())
+    assert decision["verdict"] == "ABSTAIN"
+
+
+def test_evaluate_submission_batch_cadence_never_raises_on_malformed_submission():
+    client = make_payouts_client(_TWO_BATCH_BINDINGS)
+    assert evaluate_submission(batch_cadence_listing(), {}, client=client)["verdict"] == "ABSTAIN"
+    assert evaluate_submission(batch_cadence_listing(), {"note": None}, client=client)["verdict"] == "ABSTAIN"
+
+
 def test_evaluate_submission_never_judges_subjective_quality():
     submission = {"id": 1, "claim_class": "quality", "body": "this is the best submission ever, 10/10"}
     decision = evaluate_submission(listing(), submission)

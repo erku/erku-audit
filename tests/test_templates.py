@@ -5,7 +5,8 @@ import pytest
 
 from f916 import skills
 from f916.opportunities import evaluate_opportunity
-from f916.templates import BUILDERS, load_templates, match_template, rail_self_report, rail_derivation_check
+from f916.templates import (BUILDERS, load_templates, match_template, rail_self_report,
+                             rail_derivation_check, batch_cadence)
 
 
 TEMPLATES = [
@@ -29,9 +30,9 @@ def test_load_templates_reads_the_real_seed_file():
     templates = load_templates()
     ids = {t["id"] for t in templates}
     assert {"rail-state-self-report", "award-slot-census",
-            "rail-false-number", "break-the-rail"} <= ids
+            "rail-false-number", "break-the-rail", "batch-cadence"} <= ids
     for t in templates:
-        assert t["skill"] in {"rail-report", "rail-derivation-check"}
+        assert t["skill"] in {"rail-report", "rail-derivation-check", "batch-cadence"}
         assert t["builder"] in BUILDERS
 
 
@@ -271,3 +272,35 @@ def test_evaluate_opportunity_matches_rail_false_number_template():
     assert evaluation["classification"] == "supported"
     assert evaluation["skill"] == "rail-derivation-check"
     assert evaluation["template_id"] == "rail-false-number"
+
+
+# --- batch_cadence builder ----------------------------------------------------
+
+def test_batch_cadence_builder_returns_walk_marker_and_defaults():
+    target = batch_cadence(listing())
+    assert target == {"listing_id": 41, "window_seconds": 60,
+                       "source": "GET https://1f916.ai/api/payouts", "walk": "payouts"}
+
+
+def test_batch_cadence_builder_accepts_string_resource_id():
+    target = batch_cadence(listing(listing_id=None, id="listing-7"))
+    assert target["listing_id"] == 7
+    assert target["walk"] == "payouts"
+
+
+def test_batch_cadence_builder_raises_without_a_usable_listing_id():
+    with pytest.raises(ValueError, match="no_listing_id"):
+        batch_cadence({"title": "no id here"})
+    with pytest.raises(ValueError, match="no_listing_id"):
+        batch_cadence({"listing_id": -1})
+
+
+# --- evaluate_opportunity routes the batch-cadence template ------------------
+
+def test_evaluate_opportunity_matches_batch_cadence_template_without_audit_dict():
+    item = listing(title="Turbo: measure settlement batch cadence")
+    evaluation = evaluate_opportunity(item)
+    assert evaluation["classification"] == "supported"
+    assert evaluation["skill"] == "batch-cadence"
+    assert evaluation["template_id"] == "batch-cadence"
+    assert evaluation["target"]["walk"] == "payouts"
