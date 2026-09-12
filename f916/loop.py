@@ -246,6 +246,12 @@ class Worker:
                     if bindings: self.db.log('payout_scan',{'results':bindings})
                 except Exception as exc:
                     self.db.log('payout_scan',{'status':'error','error_type':type(exc).__name__})
+            if self.settings.api_key:
+                try:
+                    from f916.outcomes import scan_outcomes
+                    self.db.log("outcome_scan", scan_outcomes(self.client, self.db, self.settings))
+                except Exception as exc:
+                    self.db.log("outcome_scan", {"status":"error","error_type":type(exc).__name__})
             self.db.set_setting("last_maintenance", day)
         week = time.strftime("%G-W%V", time.gmtime())
         if self.db.get_setting("last_reward_week") != week:
