@@ -64,7 +64,7 @@ class Worker:
         self.publisher = publisher
         self.opportunity_runner = opportunity_runner
         if self.opportunity_runner is None and settings.api_key:
-            self.opportunity_runner = OpportunityRunner(settings, db, client, self.executor, publisher)
+            self.opportunity_runner = OpportunityRunner(settings, db, client, self.executor, publisher, brain=brain)
 
     def process_approved(self):
         for item in self.db.queue_items("approved"):
