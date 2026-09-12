@@ -36,3 +36,27 @@ services:
       timeout: 6s
       retries: 3
       start_period: 10s
+  # Least-privilege GitHub broker. Dormant by default: it is only started
+  # under the "broker" profile AFTER the operator runs scripts/broker_bootstrap.py
+  # to create ./secrets/github_token. It alone holds the GitHub token; the
+  # worker reaches it in-network as http://broker:8090 with BROKER_TOKEN (set
+  # in .env). MUST stay single-worker (see broker/app.py) — state serialisation
+  # is in-process only. Not published to the host.
+  broker:
+    <<: *common
+    profiles: ["broker"]
+    command: [python, -m, uvicorn, broker.app:app, --host, 0.0.0.0, --port, '8090', --workers, '1', --no-proxy-headers]
+    environment:
+      GITHUB_TOKEN_FILE: /run/secrets/github_token
+      BROKER_STATE_FILE: /data/broker_state.json
+    volumes:
+      - ./data:/data
+      - ./secrets/github_token:/run/secrets/github_token:ro
+    expose:
+      - "8090"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 10s
