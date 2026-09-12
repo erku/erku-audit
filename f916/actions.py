@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+import re
 import httpx
 from .models import Intent
 from invariants import check_intent
@@ -26,7 +27,12 @@ class Executor:
         for event in self.db.events('artifact',1000):
             artifact=event['data']; digest=artifact.get('hash'); url=artifact.get('public_url')
             if artifact.get('listing_id') != intent.listing_id: continue
-            if not digest or not url or digest not in text or url not in text: continue
+            commit=artifact.get('commit'); seal_id=artifact.get('seal_id')
+            if not isinstance(digest,str) or not re.fullmatch(r'[a-f0-9]{64}',digest): continue
+            if not isinstance(commit,str) or not re.fullmatch(r'[a-f0-9]{40}',commit): continue
+            if not isinstance(seal_id,int) or seal_id <= 0: continue
+            if not isinstance(url,str) or commit not in url or digest not in url: continue
+            if any(marker not in text for marker in (url, f'sha256:{digest}', f'commit:{commit}', f'seal:{seal_id}')): continue
             for filename in artifact.get('evidence_files',[]):
                 path=Path(filename).resolve()
                 try:

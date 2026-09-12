@@ -65,7 +65,7 @@ def _rail(target, params):
     return {'status':'findings' if findings else 'consistent','findings':findings,'summary':'Compared supplied award and receipt totals as atomic integers for one asset; no chain or source-authenticity verification.', 'asset':list(assets)[0], 'totals':[str(t) for t in totals]}
 
 
-def run(skill, target, params, output_dir):
+def run(skill, target, params, output_dir, binding=None):
     if skill not in SKILLS: raise ValueError('Unsupported skill')
     encoded = json.dumps({'target':target,'params':params}, allow_nan=False).encode()
     if len(encoded)>256000: raise ValueError('Audit input exceeds 256 KB')
@@ -81,8 +81,19 @@ def run(skill, target, params, output_dir):
     destination = Path(output_dir).resolve() / uuid.uuid4().hex
     destination.mkdir(parents=True)
     # Sanitized input permits reproduction, except values intentionally redacted.
-    evidence = {'skill':skill, 'input':redact({'target':target,'params':params}), **redact(result)}
+    binding = binding or {}
+    evidence = {
+        **redact(binding),
+        'skill':skill,
+        'input':redact({'target':target,'params':params}),
+        'reproduction': {
+            'skill': skill,
+            'input_is_embedded': True,
+            'executes_community_commands': False,
+        },
+        **redact(result),
+    }
     content = (json.dumps(evidence,ensure_ascii=False,sort_keys=True,indent=2)+'\n').encode('utf-8')
     path = destination / 'evidence.json'
     path.write_bytes(content)
-    return {**result, 'evidence_files':[str(path)], 'hash':hashlib.sha256(content).hexdigest(), 'repro_cmd':'python -m f916.tools.sandbox --input '+shlex.quote(str(path))+' --output artifacts/reproduced', 'limitations':'Inputs containing secrets are redacted; provide originals privately for exact reproduction.'}
+    return {**result, **redact(binding), 'evidence_files':[str(path)], 'hash':hashlib.sha256(content).hexdigest(), 'repro_cmd':'python -m f916.tools.sandbox --input '+shlex.quote(str(path))+' --output artifacts/reproduced', 'limitations':'Inputs containing secrets are redacted; provide originals privately for exact reproduction.'}

@@ -18,6 +18,7 @@ from .radar import summarize
 from .publisher import Publisher
 from .seal import seal_artifact
 from .payout import PayoutManager
+from .opportunities import OpportunityRunner
 
 
 def _list(data, key):
@@ -56,10 +57,13 @@ def _inbox(me):
 
 
 class Worker:
-    def __init__(self, settings, db, client, brain, executor=None, publisher=None):
+    def __init__(self, settings, db, client, brain, executor=None, publisher=None, opportunity_runner=None):
         self.settings, self.db, self.client, self.brain = settings, db, client, brain
         self.executor = executor or Executor(settings, db, client)
         self.publisher = publisher
+        self.opportunity_runner = opportunity_runner
+        if self.opportunity_runner is None and settings.api_key:
+            self.opportunity_runner = OpportunityRunner(settings, db, client, self.executor, publisher)
 
     def process_approved(self):
         for item in self.db.queue_items("approved"):
@@ -117,6 +121,13 @@ class Worker:
             detail=self._fetch(f"/api/listings/{int(listing['id'])}","submissions")
             economics=detail.get('economics',{}) if isinstance(detail,dict) else {}
             if economics.get('available_award_capacity',1)>0: listing_details.append(detail)
+        if self.opportunity_runner:
+            for listing in listing_details:
+                try:
+                    self.opportunity_runner.process(listing)
+                except Exception as exc:
+                    self.db.log("opportunity_error", {"listing_id":listing.get("listing_id"),
+                                "stage":"cycle", "error_type":type(exc).__name__})
         snapshot = {
             "items":safe_items,
             "inbox":_inbox(me),

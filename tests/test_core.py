@@ -118,13 +118,27 @@ def test_auto_submission_requires_public_verified_local_artifact(tmp_path):
     evidence=root/'evidence.json'; evidence.write_bytes(b'proof')
     digest=hashlib.sha256(b'proof').hexdigest()
     url=f'https://github.com/erku/erku-audit/blob/{"a"*40}/artifacts/{digest}.json'
-    db.log('artifact',{'listing_id':1,'hash':digest,'evidence_files':[str(evidence)],'public_url':url})
+    db.log('artifact',{'listing_id':1,'hash':digest,'evidence_files':[str(evidence)],'public_url':url,
+                       'commit':'a'*40,'seal_id':17})
     class API:
         def check_contract(self): return True
         def post(self,*args,**kwargs): return {'id':1}
     ex=Executor(Settings(data_dir=tmp_path,api_key='key',handle='self',mode='auto'),db,API())
-    result=ex.dispatch(Intent(action='submit',listing_id=1,artifact=f'{url} sha256:{digest}'))
+    result=ex.dispatch(Intent(action='submit',listing_id=1,artifact=f'{url} sha256:{digest} commit:{"a"*40} seal:17'))
     assert result['status']=='sent'
+
+def test_auto_submission_rejects_published_but_unsealed_artifact(tmp_path):
+    db=Database(tmp_path/'s.db'); db.initialize(); root=tmp_path/'artifacts'/'run'; root.mkdir(parents=True)
+    evidence=root/'evidence.json'; evidence.write_bytes(b'proof')
+    digest=hashlib.sha256(b'proof').hexdigest(); commit='a'*40
+    url=f'https://github.com/erku/erku-audit/blob/{commit}/artifacts/{digest}.json'
+    db.log('artifact',{'listing_id':1,'hash':digest,'evidence_files':[str(evidence)],
+                       'public_url':url,'commit':commit})
+    class API: pass
+    ex=Executor(Settings(data_dir=tmp_path,api_key='key',handle='self',mode='auto'),db,API())
+    result=ex.dispatch(Intent(action='submit',listing_id=1,artifact=f'{url} sha256:{digest} commit:{commit}'))
+    assert result['status']=='blocked'
+    assert result['reason']=='public_verified_artifact_required'
 
 def test_executor_enforces_hard_content_invariants(tmp_path):
     db=Database(tmp_path/'s.db'); db.initialize()
