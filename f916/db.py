@@ -75,13 +75,17 @@ class Database:
         with self.connect() as c: return c.execute("UPDATE queue SET intent=?,fingerprint=? WHERE id=? AND status='pending'",(json.dumps(clean),fingerprint(clean),id)).rowcount==1
     def reserve_action(self,intent,now=None):
         now=time.time() if now is None else now; action=intent['action']; fp=fingerprint(intent)
-        scope=str(intent.get('slug','')) if action=='propose' else ''
-        limit={'post':1,'comment':20,'vote':50,'submit':10,'propose':3,'tag':50,'cadence':1,'porch':20}.get(action,0)
+        scope=(str(intent.get('slug','')) if action=='propose' else
+               str(intent.get('post_id','')) if action=='comment' else '')
+        limit={'post':1,'comment':5,'vote':50,'submit':10,'propose':3,'tag':50,'cadence':1,'porch':20}.get(action,0)
         start=now-86400 if action in {'submit','propose'} else now-now%86400
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             if c.execute('SELECT 1 FROM action_reservations WHERE fingerprint=?',(fp,)).fetchone(): return False
-            count=c.execute('SELECT COUNT(*) FROM action_reservations WHERE action=? AND scope=? AND created_at>=?',(action,scope,start)).fetchone()[0]
+            if action=='comment' and scope:
+                recent=c.execute('SELECT 1 FROM action_reservations WHERE action=? AND scope=? AND created_at>=?',('comment',scope,now-21600)).fetchone()
+                if recent: return False
+            count=c.execute('SELECT COUNT(*) FROM action_reservations WHERE action=? AND created_at>=?',(action,start)).fetchone()[0]
             if count>=limit: return False
             c.execute('INSERT INTO action_reservations VALUES(?,?,?,?)',(fp,action,scope,now)); return True
     def release_action(self,intent):

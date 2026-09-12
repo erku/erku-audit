@@ -47,19 +47,23 @@ class Executor:
                     return result('blocked','self_vote_or_unknown_author')
             except Exception: return result('blocked','author_lookup_failed')
         if not self.client.check_contract(): return result('blocked','contract')
-        if not self.db.reserve_action(data): return result('blocked','duplicate_or_limit')
         fields={'post':['title','body','url'],'comment':['post_id','body'],'vote':[],'tag':['tag'],'cadence':['interval_seconds'],'porch':['body'],'submit':['artifact','note'],'propose':['title','summary','body','wants_to_build']}
         payload={k:data[k] for k in fields[action] if k in data}
-        if action=='vote': payload={'target_id':str(intent.comment_id or intent.post_id),'target_type':'comment' if intent.comment_id else 'post'}
-        if action=='tag': payload['target_id']=str(intent.post_id)
-        if action=='comment': payload['post_id']=str(intent.post_id)
+        if action=='vote': payload={'target_id':intent.comment_id or intent.post_id,'target_type':'comment' if intent.comment_id else 'post'}
+        if action=='tag': payload['post_id']=intent.post_id
+        if action=='comment': payload['post_id']=intent.post_id
         path={'cadence':'/api/me/cadence','submit':f'/api/listings/{intent.listing_id}/submissions','propose':f'/api/grants/{intent.slug}/proposals'}.get(action,f'/api/{action}')
+        reservation={'action':action,'path':path,'payload':payload}
+        # Preserve the scope fields used by the database's per-target limits.
+        if intent.post_id is not None: reservation['post_id']=intent.post_id
+        if intent.slug is not None: reservation['slug']=intent.slug
+        if not self.db.reserve_action(reservation): return result('blocked','duplicate_or_limit')
         try:
             response=self.client.post(path,payload)
             return result('sent',response=response)
         except httpx.HTTPStatusError as exc:
             if 400<=exc.response.status_code<500 and exc.response.status_code not in {408,409,425}:
-                self.db.release_action(data)
+                self.db.release_action(reservation)
                 return result('error','rejected',http_status=exc.response.status_code)
             return result('uncertain','uncertain_write_no_retry',error_type=type(exc).__name__)
         except Exception as exc:

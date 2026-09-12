@@ -36,9 +36,11 @@ class Client:
         path=self._path(path); key='etag:'+path+json.dumps(params,sort_keys=True)
         etag=self.db.get_setting(key)
         response=self._request('GET',path,params=params,headers={'If-None-Match':etag} if etag else {})
-        if response.status_code==304: return None
+        if response.status_code==304: return self.db.get_setting(key+':body')
         response.raise_for_status(); data=response.json()
-        if response.headers.get('etag'): self.db.set_setting(key,response.headers['etag'])
+        if response.headers.get('etag'):
+            self.db.set_setting(key,response.headers['etag'])
+            self.db.set_setting(key+':body',data)
         return data
     def check_contract(self):
         try:

@@ -49,6 +49,16 @@ def test_brain_normalizes_deepseek_type_and_item_id(tmp_path):
     result=Brain(Settings(data_dir=tmp_path),db,transport=httpx.MockTransport(handler)).decide({"items":[]})
     assert [(x.action,x.post_id) for x in result]==[("vote",4996),("tag",4996)]
 
+def test_brain_hard_caps_intents_even_if_model_ignores_schema(tmp_path):
+    from f916.brain import Brain
+    intents=[{"action":"comment","post_id":n+1,"body":f"note {n}"} for n in range(30)]
+    def handler(request):
+        return httpx.Response(200,json={"message":{"content":json.dumps({"intents":intents})},"prompt_eval_count":1,"eval_count":1})
+    db=Database(tmp_path/'state.db'); db.initialize()
+    brain=Brain(Settings(data_dir=tmp_path),db,transport=httpx.MockTransport(handler))
+    assert len(brain.decide({"items":[]}))==8
+    assert db.events('llm')[0]['data']['overflow_rejected']==22
+
 
 def test_brain_blocks_before_exceeding_usd_budget(tmp_path):
     from f916.brain import Brain
@@ -117,3 +127,35 @@ def test_worker_executes_approved_queue_once(tmp_path):
     worker.process_approved(); worker.process_approved()
     assert worker.executor.calls == 1
     assert db.get_queue(item)["status"] == "sent"
+
+def test_cycle_acks_id_cursor_only_after_successful_processing(tmp_path):
+    from f916.loop import Worker
+    db=Database(tmp_path/'state.db'); db.initialize(); calls=[]
+    cursor={'version':1,'timestamp':10,'comments':20,'mentions':30}
+    class API:
+        def get(self,path,params=None):
+            calls.append(('get',path,params))
+            if path=='/api/me': return {'ack_cursor':cursor,'since_last_visit':{},'karma':0,'today':{}}
+            return {}
+        def post(self,path,payload): calls.append(('post',path,payload)); return {'ok':True}
+    class Brain:
+        last_status='ok'
+        def decide(self,*args): return []
+    result=Worker(Settings(data_dir=tmp_path,api_key='key'),db,API(),Brain()).cycle()
+    assert result['acked']
+    assert ('get','/api/me',{'cursor_mode':'id'}) in calls
+    assert ('post','/api/me/ack',{'up_to':cursor}) in calls
+
+def test_cycle_does_not_ack_or_commit_snapshot_when_llm_is_blocked(tmp_path):
+    from f916.loop import Worker
+    db=Database(tmp_path/'state.db'); db.initialize(); posts=[]
+    class API:
+        def get(self,path,params=None):
+            return {'ack_cursor':{'version':1,'timestamp':1,'comments':1,'mentions':1},'since_last_visit':{}} if path=='/api/me' else {}
+        def post(self,path,payload): posts.append(path)
+    class Brain:
+        last_status='blocked'
+        def decide(self,*args): return []
+    result=Worker(Settings(data_dir=tmp_path,api_key='key'),db,API(),Brain()).cycle()
+    assert not result['processed'] and '/api/me/ack' not in posts
+    assert db.get_setting('snapshot_hash') is None

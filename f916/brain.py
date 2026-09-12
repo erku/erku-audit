@@ -89,6 +89,7 @@ class Brain:
             base_url=settings.ollama_url, transport=transport, timeout=120,
             follow_redirects=False,
         )
+        self.last_status = "idle"
 
     def _usage(self):
         today = datetime.now(timezone.utc).date().isoformat()
@@ -96,6 +97,7 @@ class Brain:
         return current if current.get("day") == today else {"day": today, "tokens": 0, "cost_usd": 0.0}
 
     def decide(self, snapshot, task="triage"):
+        self.last_status = "running"
         usage = self._usage()
         persona = self.db.get_setting("persona", "Concise, candid, technical. State limits of evidence.")
         content_prompt = self.db.get_setting("content_prompt", "Add value with reproducible evidence; otherwise use noop.")
@@ -106,11 +108,11 @@ class Brain:
                 {"role":"user", "content": f"Task: {task}\n" + wrap_untrusted(snapshot)},
             ],
             "format": RESPONSE_SCHEMA,
-            "think": "low",
+            "think": False,
             "stream": False,
-            "options": {"num_predict": 4096, "temperature": 0.2},
+            "options": {"num_predict": 2048, "temperature": 0.1},
         }
-        projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 4096
+        projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 2048
         windows = (
             ("hourly_token_budget", getattr(self.settings, "llm_hourly_tokens", 0), self.db.llm_tokens_since(time.time()-3600)),
             ("daily_token_budget", self.settings.llm_daily_tokens, usage["tokens"]),
@@ -119,15 +121,17 @@ class Brain:
         for reason, limit, consumed in windows:
             if limit > 0 and consumed + projected_tokens > limit:
                 self.db.log("llm", {"status":"blocked", "reason":reason, "consumed":consumed, "projected":projected_tokens, "limit":limit})
+                self.last_status = "blocked"
                 return []
         # Conservatively reserve at most one token per UTF-8 byte plus the
         # configured output ceiling. Actual usage replaces this estimate.
         projected = usage.get("cost_usd", 0.0) + (
             len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))*self.settings.llm_input_usd_per_million
-            + 4096*self.settings.llm_output_usd_per_million
+            + 2048*self.settings.llm_output_usd_per_million
         )/1_000_000
         if self.settings.llm_daily_budget_usd > 0 and projected > self.settings.llm_daily_budget_usd:
             self.db.log("llm", {"status":"blocked", "reason":"daily_usd_budget", "projected_usd":projected})
+            self.last_status = "blocked"
             return []
         started = time.monotonic()
         try:
@@ -140,6 +144,7 @@ class Brain:
             self.db.log("llm", {"status":"error", "task":task, "error_type":type(exc).__name__,
                                 "duration":time.monotonic()-started,
                                 "response_preview":redact(locals().get("content", ""))[:500]})
+            self.last_status = "error"
             return []
         prompt_tokens = int(result.get("prompt_eval_count") or 0)
         output_tokens = int(result.get("eval_count") or 0)
@@ -148,7 +153,10 @@ class Brain:
         usage["cost_usd"] = round(float(usage.get("cost_usd", 0)) + cost, 8)
         self.db.set_setting("llm_usage", usage)
         accepted, rejected = [], []
-        for raw in parsed.get("intents", []) if isinstance(parsed, dict) else []:
+        raw_intents = parsed.get("intents", []) if isinstance(parsed, dict) else []
+        if not isinstance(raw_intents, list): raw_intents = []
+        overflow = max(0, len(raw_intents) - 8)
+        for raw in raw_intents[:8]:
             try:
                 raw = _normalize_intent(raw)
                 intent = Intent.model_validate(raw)
@@ -161,7 +169,9 @@ class Brain:
                 rejected.append({"intent":redact(raw), "reasons":["schema_invalid"]})
         self.db.log("llm", {"status":"ok", "task":task, "model":result.get("model", self.settings.ollama_model),
                             "prompt_tokens":prompt_tokens, "output_tokens":output_tokens, "cost_usd":cost,
-                            "duration":time.monotonic()-started, "accepted":len(accepted), "rejected":rejected})
+                            "duration":time.monotonic()-started, "accepted":len(accepted), "rejected":rejected,
+                            "overflow_rejected":overflow})
+        self.last_status = "ok"
         return accepted
 
     def close(self):

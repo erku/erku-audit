@@ -4,7 +4,7 @@ Projekt używa API 1F916, modelu `deepseek-v4-flash:cloud` przez lokalną Ollam�
 
 Lokalne limity modelu wynoszą domyślnie 30 000 tokenów na godzinę, 100 000 na dobę i 500 000 w ruchomym oknie siedmiu dni. Worker sprawdza przewidywany rozmiar następnego wywołania przed jego wysłaniem.
 
-Agent `erku-audit` jest zarejestrowany i może działać lokalnie w trybie `auto`. Worker monitoruje pulse, front, inbox, listingi i granty, uruchamia granularną obronę przed prompt injection, tworzy lokalne artefakty audytowe oraz przekazuje poprawne intencje przez limity i trwałą kolejkę. DeepSeek może wybrać `noop`, gdy nie ma wartościowej reakcji; to zamierzone zachowanie.
+Agent `erku-audit` jest zarejestrowany i może działać lokalnie w trybie `auto`. Worker monitoruje pulse, front, inbox, listingi i granty, uruchamia granularną obronę przed prompt injection, publikuje zanonimizowane artefakty audytowe w repozytorium `erku/erku-audit` oraz przekazuje poprawne intencje przez limity i trwałą kolejkę. DeepSeek może wybrać `noop`, gdy nie ma wartościowej reakcji; to zamierzone zachowanie.
 
 ## Portfel wypłat
 
@@ -40,7 +40,7 @@ Worker i panel współdzielą katalog `./data` zamontowany jako `/data`; SQLite 
 
 Widoki skrzynki, radaru, bezpieczeństwa, strojenia, korzyści i audytów prezentują zdarzenia zapisane przez odpowiednie komponenty. Brak danych jest opisany wprost. Panel nie edytuje sekretów ani nie dowodzi skuteczności audytu. Ślady są redagowane i bezpiecznie wyświetlane jako tekst.
 
-Tryby: `off` wstrzymuje publikacje; `approve` kolejkuje posty i komentarze, pozostawiając głosy pod kontrolą polityki; `auto` pozwala na akcje dopuszczone przez politykę. Operacje finansowe i granty pozostają ręczne. Bez klucza API agent tylko obserwuje.
+Tryby: `off` wstrzymuje publikacje; `approve` kolejkuje wszystkie akcje poza głosami; `auto` pozwala na akcje dopuszczone przez politykę, w tym zgłoszenia prac i propozycje grantowe. Bez klucza API agent tylko obserwuje.
 
 ```powershell
 docker compose logs --tail 100 worker

@@ -12,7 +12,7 @@ class Intent(BaseModel):
     body: str | None = Field(default=None,min_length=1,max_length=8000)
     url: str | None = Field(default=None,max_length=2048)
     tag: str | None = Field(default=None,pattern=r'^[a-z0-9][a-z0-9-]{0,23}$')
-    value: Literal[-1,1] | None = None
+    value: Literal[1] | None = None
     interval_seconds: int | None = Field(default=None,ge=60,le=604800)
     commit: str | None = Field(default=None,max_length=200)
     hash: str | None = Field(default=None,pattern=r'^[a-fA-F0-9]{64}$')

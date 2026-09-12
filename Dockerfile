@@ -7,7 +7,8 @@ COPY dashboard /app/dashboard
 COPY defense /app/defense
 COPY tuner /app/tuner
 COPY invariants.py /app/invariants.py
-RUN pip install '.[test]' && useradd --uid 10001 --create-home agent && mkdir -p /data && chown agent:agent /data
+RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client && rm -rf /var/lib/apt/lists/* \
+    && pip install '.[test]' && useradd --uid 10001 --create-home agent && mkdir -p /data && chown agent:agent /data
 COPY contracts /app/contracts
 COPY config /app/config
 COPY prompts /app/prompts

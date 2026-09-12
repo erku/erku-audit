@@ -15,6 +15,7 @@ from .client import Client
 from .config import Settings
 from .db import Database
 from .radar import summarize
+from .publisher import Publisher
 
 
 def _list(data, key):
@@ -38,17 +39,25 @@ def _compact(rows, fields, text_limit=1200, limit=20):
 
 def _inbox(me):
     since = me.get("since_last_visit", {}) if isinstance(me, dict) else {}
-    rows=[]
+    rows=[]; positions={}
     for bucket in ("replies","comments_on_your_posts","in_threads_you_joined","mentions_of_you"):
         for item in since.get(bucket, []) if isinstance(since, dict) else []:
-            if isinstance(item,dict): rows.append({"bucket":bucket, **item})
+            if not isinstance(item,dict): continue
+            identity=item.get("comment_id",item.get("id"))
+            if identity is not None and identity in positions:
+                prior=rows[positions[identity]]
+                prior["bucket"] = ",".join(dict.fromkeys(prior["bucket"].split(",")+[bucket]))
+            else:
+                if identity is not None: positions[identity]=len(rows)
+                rows.append({"bucket":bucket, **item})
     return _compact(rows, ("bucket","id","post_id","comment_id","author","title","body","created_at"), 1500, 30)
 
 
 class Worker:
-    def __init__(self, settings, db, client, brain, executor=None):
+    def __init__(self, settings, db, client, brain, executor=None, publisher=None):
         self.settings, self.db, self.client, self.brain = settings, db, client, brain
         self.executor = executor or Executor(settings, db, client)
+        self.publisher = publisher
 
     def process_approved(self):
         for item in self.db.queue_items("approved"):
@@ -73,7 +82,7 @@ class Worker:
         # Authenticated pulse is the platform's declared liveness signal. Its
         # timestamps are deliberately excluded from the decision snapshot.
         pulse = self._fetch("/api/pulse", "events", params={"wait":"0"})
-        me = self._fetch("/api/me", "since_last_visit") if self.settings.api_key else {}
+        me = self._fetch("/api/me", "since_last_visit", params={"cursor_mode":"id"}) if self.settings.api_key else {}
         front = self._fetch("/api/front", "posts")
         listings = self._fetch("/api/listings", "listings")
         grants = self._fetch("/api/grants", "grants")
@@ -101,20 +110,35 @@ class Worker:
         if digest == previous:
             self.db.log("cycle", {"status":"unchanged", "snapshot_hash":digest})
             return {"changed":False}
-        self.db.set_setting("snapshot_hash", digest)
         for incident in quarantined:
             self.db.log("quarantine", incident)
         self.db.log("inbox", {"snapshot_hash":digest, "posts":len(safe_items), "quarantined":len(posts)-len(safe_items)})
         for intent in self.brain.decide(snapshot, "triage"):
             self.executor.dispatch(intent)
+        if getattr(self.brain, "last_status", "ok") != "ok":
+            self.db.log("cycle", {"status":"deferred", "snapshot_hash":digest,
+                                  "reason":getattr(self.brain,"last_status","unknown")})
+            return {"changed":True,"processed":False}
+        self.db.set_setting("snapshot_hash", digest)
+        ack_cursor = me.get("ack_cursor") if isinstance(me,dict) else None
+        if ack_cursor:
+            try: self.client.post("/api/me/ack", {"up_to":ack_cursor})
+            except Exception as exc:
+                self.db.log("cycle", {"status":"ack_error", "error_type":type(exc).__name__})
+                return {"changed":True,"processed":True,"acked":False}
         self.db.log("radar", {"items":summarize(snapshot["listings"], snapshot["grants"])})
         self.db.log("cycle", {"status":"complete", "snapshot_hash":digest})
-        return {"changed":True}
+        return {"changed":True,"processed":True,"acked":bool(ack_cursor)}
 
     def daily_audit(self):
         day = time.strftime("%Y-%m-%d", time.gmtime())
         if self.db.get_setting("last_daily_audit") == day: return None
         artifact = run_skill("self-redteam", {}, {}, Path(self.settings.data_dir)/"artifacts")
+        if self.publisher:
+            try: artifact = self.publisher.publish(artifact)
+            except Exception as exc:
+                self.db.log("publisher", {"status":"error","error_type":type(exc).__name__})
+                return None
         self.db.log("artifact", artifact)
         self.db.set_setting("last_daily_audit", day)
         prompt = {"artifact":artifact, "instruction":"Draft at most one evidence-first post. Include exact hash and limitations."}
@@ -144,7 +168,8 @@ def main():
     settings = Settings()
     db = Database(Path(settings.data_dir)/"agent.sqlite3"); db.initialize()
     client = Client(settings, db); brain = Brain(settings, db)
-    worker = Worker(settings, db, client, brain)
+    publisher = Publisher(settings) if settings.github_repo else None
+    worker = Worker(settings, db, client, brain, publisher=publisher)
     db.set_setting("mode", db.get_setting("mode", settings.mode))
     db.log("worker", {"status":"started", "handle":settings.handle, "model":settings.ollama_model})
     try:
