@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 
 from invariants import redact
+from .broker_client import BrokerClient
+from .builder import build_project
 from .models import Intent
+from .project_policy import load_project_templates, qualify
 from .seal import seal_artifact
 from .skills import SKILLS, run as run_skill
 from .templates import BUILDERS, load_templates, match_template
@@ -110,10 +113,23 @@ def evaluate_opportunity(listing):
 
 class OpportunityRunner:
     TERMINAL = frozenset({"submitted", "submission_queued", "submission_uncertain", "seal_uncertain", "unsupported", "project_required"})
+    # Terminal states for the project-autopilot pipeline (see run_project):
+    # a per-listing key attempted exactly once, distinct from TERMINAL above.
+    PROJECT_TERMINAL = frozenset({
+        "project_unqualified", "project_uncertain", "project_submitted",
+        "project_queued", "project_submission_failed", "project_error",
+    })
 
-    def __init__(self, settings, db, client, executor, publisher=None, sealer=seal_artifact):
+    def __init__(self, settings, db, client, executor, publisher=None, sealer=seal_artifact,
+                 broker_client_cls=BrokerClient):
         self.settings, self.db, self.client = settings, db, client
         self.executor, self.publisher, self.sealer = executor, publisher, sealer
+        self.broker_client_cls = broker_client_cls
+        # Defense in depth: if the broker token is ever accidentally placed in
+        # a logged event's text, db.log's redact() will scrub it (redact()
+        # ignores falsy entries, so this is a no-op while broker_token is '').
+        if settings.broker_token:
+            self.db.secrets.append(settings.broker_token)
 
     def _key(self, evaluation):
         return f'opportunity:{evaluation.get("listing_id", "invalid")}:{evaluation["source_hash"]}'
@@ -137,13 +153,24 @@ class OpportunityRunner:
         evaluation = evaluate_opportunity(listing)
         key = self._key(evaluation)
         state = self.db.get_setting(key, {})
-        if state.get("status") in self.TERMINAL:
+        classification = evaluation["classification"]
+        # The project autopilot is inert unless BOTH broker settings are
+        # configured; with no broker env, project_required behaves exactly
+        # as before (a single terminal, human-review-shaped stop).
+        project_active = classification == "project_required" and bool(
+            self.settings.broker_url and self.settings.broker_token
+        )
+        if state.get("status") in self.TERMINAL and not project_active:
             return {**state, "classification": "already_attempted", "reason": "terminal_attempt_exists"}
         if not state:
             public_evaluation = {k: v for k, v in evaluation.items() if k not in {"target", "params"}}
             self.db.log("opportunity", public_evaluation)
-            state = self._save(key, public_evaluation, evaluation["classification"])
-        if evaluation["classification"] != "supported":
+            state = self._save(key, public_evaluation, classification)
+        if classification == "project_required":
+            if project_active:
+                return self.run_project(listing, evaluation)
+            return state
+        if classification != "supported":
             return state
 
         artifact = state.get("artifact")
@@ -196,3 +223,155 @@ class OpportunityRunner:
         if result_status == "queued":
             return self._save(key, state, "submission_queued", queue_id=result.get("queue_id"))
         return self._save(key, state, "submission_failed", submission_result=redact(result))
+
+    def _project_key(self, evaluation):
+        return f'project:{evaluation.get("listing_id", "invalid")}:{evaluation["source_hash"]}'
+
+    def run_project(self, listing, evaluation):
+        """Autonomous, no-human-queue delivery of a `project_required` listing.
+
+        Only ever invoked by `process` when a broker is configured. Every
+        step is checkpointed under a per-listing key (`_project_key`) so a
+        listing is attempted once: any not-yet-confirmed remote write
+        (broker create/publish, evidence publish, seal, submit) lands in a
+        terminal 'uncertain' state and is never retried automatically, and
+        any unexpected exception is caught, logged as `project_error`
+        (no secrets), and turned into a terminal state rather than crashing
+        the opportunity cycle.
+        """
+        key = self._project_key(evaluation)
+        state = self.db.get_setting(key, {})
+        if state.get("status") in self.PROJECT_TERMINAL:
+            return state
+        listing_id = evaluation.get("listing_id")
+        try:
+            if "spec" not in state:
+                templates = load_project_templates()
+                existing_count = len(self.db.get_setting("project_repos", []))
+                spec = qualify(evaluation, listing, templates,
+                                existing_project_count=existing_count,
+                                max_projects=self.settings.max_projects)
+                if spec is None:
+                    self.db.log("project", {"listing_id": listing_id, "stage": "qualify", "status": "unqualified"})
+                    return self._save(key, state, "project_unqualified")
+                self.db.log("project", {"listing_id": listing_id, "stage": "qualify",
+                            "status": "qualified", "name": spec["name"]})
+                state = self._save(key, state, "qualified", spec=spec)
+            spec = state["spec"]
+
+            if "manifest" not in state:
+                workspace = Path(self.settings.data_dir) / "projects"
+                manifest = build_project(spec, workspace)
+                self.db.log("project", {"listing_id": listing_id, "stage": "build", "name": spec["name"]})
+                state = self._save(key, state, "built", manifest=manifest)
+            manifest = state["manifest"]
+
+            need_repo = "repo" not in state
+            need_publish = "publish_result" not in state
+            broker = self.broker_client_cls(self.settings.broker_url, self.settings.broker_token) \
+                if (need_repo or need_publish) else None
+
+            if need_repo:
+                try:
+                    repo = broker.create_repo(spec["name"])
+                except Exception as exc:
+                    self.db.log("project_error", {"listing_id": listing_id, "stage": "create_repo",
+                                "error_type": type(exc).__name__})
+                    return self._save(key, state, "project_uncertain")
+                repos = self.db.get_setting("project_repos", [])
+                if spec["name"] not in repos:
+                    self.db.set_setting("project_repos", repos + [spec["name"]])
+                self.db.log("project", {"listing_id": listing_id, "stage": "create_repo", "name": spec["name"]})
+                state = self._save(key, state, "repo_created", repo=repo)
+
+            if "publish_result" not in state:
+                workspace = Path(self.settings.data_dir) / "projects"
+                project_dir = workspace / spec["name"]
+                # Read back exactly manifest['files'] from the built tree
+                # (never the manifest file itself) as the broker payload.
+                file_contents = {entry["path"]: (project_dir / entry["path"]).read_text(encoding="utf-8")
+                                  for entry in manifest["files"]}
+                try:
+                    publish_result = broker.publish(spec["name"], manifest, file_contents)
+                except Exception as exc:
+                    self.db.log("project_error", {"listing_id": listing_id, "stage": "broker_publish",
+                                "error_type": type(exc).__name__})
+                    return self._save(key, state, "project_uncertain")
+                self.db.log("project", {"listing_id": listing_id, "stage": "broker_publish", "name": spec["name"]})
+                state = self._save(key, state, "project_published", publish_result=publish_result)
+
+            repo_url = (state.get("repo") or {}).get("html_url", "")
+
+            if "evidence" not in state:
+                # Publish the manifest itself as audit evidence to erku-audit
+                # (a sealable, listing-bound artifact) -- the project lives in
+                # the new repo, the evidence lives in erku-audit, and the
+                # submission references both.
+                artifacts_dir = Path(self.settings.data_dir) / "artifacts" / spec["name"]
+                artifacts_dir.mkdir(parents=True, exist_ok=True)
+                manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False)
+                                   + "\n").encode("utf-8")
+                evidence_path = artifacts_dir / "project.manifest.json"
+                evidence_path.write_bytes(manifest_bytes)
+                evidence = {
+                    "listing_id": listing_id,
+                    "source_hash": spec.get("source_hash"),
+                    "project_name": spec["name"],
+                    "project_repo": repo_url,
+                    "hash": hashlib.sha256(manifest_bytes).hexdigest(),
+                    "evidence_files": [str(evidence_path)],
+                }
+                state = self._save(key, state, "evidence_ready", evidence=evidence)
+            evidence = state["evidence"]
+
+            if not evidence.get("public_url"):
+                if self.publisher is None:
+                    return self._save(key, state, "project_uncertain", evidence=evidence)
+                try:
+                    evidence = self.publisher.publish(evidence)
+                except Exception as exc:
+                    self.db.log("project_error", {"listing_id": listing_id, "stage": "evidence_publish",
+                                "error_type": type(exc).__name__})
+                    return self._save(key, state, "project_uncertain", evidence=evidence)
+                self.db.log("project", {"listing_id": listing_id, "stage": "evidence_publish", "name": spec["name"]})
+                state = self._save(key, state, "evidence_published", evidence=evidence)
+
+            if evidence.get("seal_id") is None:
+                label = f'project-{listing_id}'
+                try:
+                    sealed = self.sealer(self.client, self.settings, evidence["hash"], label)
+                except (FileNotFoundError, ValueError) as exc:
+                    self.db.log("project_error", {"listing_id": listing_id, "stage": "seal",
+                                "error_type": type(exc).__name__})
+                    return self._save(key, state, "project_error", evidence=evidence)
+                except Exception as exc:
+                    # A transport failure after a POST has an unknown outcome.
+                    # Never repeat the write automatically.
+                    self.db.log("project_error", {"listing_id": listing_id, "stage": "seal",
+                                "error_type": type(exc).__name__, "uncertain": True})
+                    return self._save(key, state, "project_uncertain", evidence=evidence)
+                evidence = {**evidence, "seal_id": sealed.get("id")}
+                state = self._save(key, state, "sealed", evidence=evidence)
+
+            if not state.get("evidence_logged"):
+                self.db.log("artifact", evidence)
+                state = self._save(key, state, "sealed", evidence=evidence, evidence_logged=True)
+
+            evidence_ref = (f'{evidence["public_url"]} sha256:{evidence["hash"]} '
+                            f'commit:{evidence["commit"]} seal:{evidence["seal_id"]}')
+            reference = f'{repo_url} {evidence_ref}'
+            result = self.executor.dispatch(Intent(
+                action="submit", listing_id=listing_id, artifact=reference,
+                note="Autonomous deterministic project delivered; see repository and evidence."))
+            result_status = result.get("status")
+            if result_status == "sent":
+                return self._save(key, state, "project_submitted", submission=result.get("response"))
+            if result_status == "uncertain":
+                return self._save(key, state, "project_uncertain")
+            if result_status == "queued":
+                return self._save(key, state, "project_queued", queue_id=result.get("queue_id"))
+            return self._save(key, state, "project_submission_failed", submission_result=redact(result))
+        except Exception as exc:
+            self.db.log("project_error", {"listing_id": listing_id, "stage": "unexpected",
+                        "error_type": type(exc).__name__})
+            return self._save(key, state, "project_error")

@@ -83,12 +83,43 @@ class GitHubClient:
         return response.json()
 
     def put_file(self, name: str, path: str, content_b64: str, message: str, branch: str) -> dict:
-        """Create or update a single file via the GitHub contents API."""
+        """Create or update a single file via the GitHub contents API.
+
+        Looks up any existing file at `path`@`branch` first: if one exists
+        (200 with a `sha`), that sha is included in the PUT payload so the
+        write updates it instead of failing with a stale-sha conflict; if
+        none exists (404), the file is created exactly as before. Any other
+        lookup status is treated the same as "no existing file" so a first
+        create is never blocked by an unrelated lookup hiccup.
+        """
         owner = self._owner_login()
+        existing = self._request("GET", f"/repos/{owner}/{name}/contents/{path}", params={"ref": branch})
         payload = {"message": message, "content": content_b64, "branch": branch}
+        if existing.status_code == 200:
+            sha = existing.json().get("sha")
+            if sha:
+                payload["sha"] = sha
         response = self._request("PUT", f"/repos/{owner}/{name}/contents/{path}", json=payload)
         if response.status_code not in (200, 201):
             raise GitHubClientError(f"put_file({name!r}, {path!r}) failed (status {response.status_code})")
+        return response.json()
+
+    def create_branch(self, name: str, new_branch: str, from_branch: str) -> dict:
+        """Create `new_branch` pointing at the current tip of `from_branch`."""
+        owner = self._owner_login()
+        ref_response = self._request("GET", f"/repos/{owner}/{name}/git/ref/heads/{from_branch}")
+        if ref_response.status_code != 200:
+            raise GitHubClientError(
+                f"create_branch({name!r}) could not resolve base ref {from_branch!r} "
+                f"(status {ref_response.status_code})"
+            )
+        base_sha = ref_response.json().get("object", {}).get("sha")
+        response = self._request(
+            "POST", f"/repos/{owner}/{name}/git/refs",
+            json={"ref": f"refs/heads/{new_branch}", "sha": base_sha},
+        )
+        if response.status_code != 201:
+            raise GitHubClientError(f"create_branch({name!r}, {new_branch!r}) failed (status {response.status_code})")
         return response.json()
 
     def create_pull(self, name: str, head: str, base: str, title: str) -> dict:

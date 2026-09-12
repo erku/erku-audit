@@ -300,6 +300,8 @@ def create_app(settings: BrokerSettings | None = None, github_client: GitHubClie
 
             commits = []
             try:
+                if has_content:
+                    github_client.create_branch(name, head_branch, default_branch)
                 for rel_path in sorted(manifest.file_contents):
                     content = manifest.file_contents[rel_path]
                     content_b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")

@@ -30,6 +30,11 @@ class Settings:
     llm_retry_cap_seconds: int = field(default_factory=lambda: int(os.getenv('LLM_RETRY_CAP_SECONDS','3600')))
     ordinary_cadence_seconds: int = field(default_factory=lambda: int(os.getenv('ORDINARY_CADENCE_SECONDS','3600')))
     urgent_cadence_seconds: int = field(default_factory=lambda: int(os.getenv('URGENT_CADENCE_SECONDS','1800')))
+    # Autonomous project pipeline (Task B1): inert unless BOTH broker_url and
+    # broker_token are set (see f916/opportunities.py OpportunityRunner.process).
+    broker_url: str = field(default_factory=lambda: os.getenv('BROKER_URL',''))
+    broker_token: str = field(default_factory=lambda: os.getenv('BROKER_TOKEN',''), repr=False)
+    max_projects: int = field(default_factory=lambda: int(os.getenv('MAX_PROJECTS','3')))
     def __post_init__(self):
         self.data_dir=Path(self.data_dir)
         if self.mode not in {'off','approve','auto'}: raise ValueError('Invalid mode')

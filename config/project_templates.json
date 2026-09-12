@@ -1,0 +1,8 @@
+[
+  {
+    "id": "rail-window-report",
+    "project_template": "static-report",
+    "title_contains": ["window"],
+    "name_suffix": "rail-window"
+  }
+]

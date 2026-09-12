@@ -13,13 +13,16 @@ sibling `file_contents` field (see the docstring on
 `broker.app.PublishRequest` for why the brief's literal "+ {"files":
 {...content...}}}" phrasing would silently collide with that field).
 """
+import base64
 import hashlib
 import json
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from broker.app import BrokerSettings, create_app
+from broker.github import GitHubClient, GitHubClientError
 
 FAKE_GITHUB_TOKEN = "ghp_fake_super_secret_do_not_leak_0123456789"
 BROKER_TOKEN = "test-broker-shared-secret"
@@ -33,6 +36,7 @@ class FakeGitHubClient:
         self.created: list[str] = []
         self.put_files: list[dict] = []
         self.pulls: list[dict] = []
+        self.branches: list[dict] = []
         self._repos: dict[str, dict] = {}
 
     def create_public_repo(self, name: str) -> dict:
@@ -53,6 +57,10 @@ class FakeGitHubClient:
     def put_file(self, name: str, path: str, content_b64: str, message: str, branch: str) -> dict:
         self.put_files.append({"name": name, "path": path, "branch": branch, "message": message})
         return {"content": {"path": path}, "commit": {"sha": f"sha-{len(self.put_files)}"}}
+
+    def create_branch(self, name: str, new_branch: str, from_branch: str) -> dict:
+        self.branches.append({"name": name, "new_branch": new_branch, "from_branch": from_branch})
+        return {"ref": f"refs/heads/{new_branch}", "object": {"sha": f"base-sha-{len(self.branches)}"}}
 
     def create_pull(self, name: str, head: str, base: str, title: str) -> dict:
         self.pulls.append({"name": name, "head": head, "base": base, "title": title})
@@ -200,11 +208,12 @@ def test_publish_success(broker):
     assert {c["path"] for c in fake.put_files} == {"README.md", "main.py"}
 
 
-def test_publish_second_time_opens_pr(broker):
+def test_publish_second_time_creates_branch_then_opens_pr(broker):
     client, fake, _settings = broker
     client.post("/repos", json={"name": "erku-1f916-demo"}, headers=AUTH)
     first_manifest = build_manifest("erku-1f916-demo", {"README.md": "v1\n"})
     assert client.post("/repos/erku-1f916-demo/publish", json=first_manifest, headers=AUTH).status_code == 200
+    assert fake.branches == []  # first publish is straight-to-default, no branch
 
     second_manifest = build_manifest("erku-1f916-demo", {"README.md": "v2\n"})
     response = client.post("/repos/erku-1f916-demo/publish", json=second_manifest, headers=AUTH)
@@ -213,6 +222,13 @@ def test_publish_second_time_opens_pr(broker):
     body = response.json()
     assert body["pull_request"] is not None
     assert len(fake.pulls) == 1
+    assert len(fake.branches) == 1
+    expected_branch = f"broker-publish-{second_manifest['tree_hash'][:12]}"
+    assert fake.branches[0] == {"name": "erku-1f916-demo", "new_branch": expected_branch, "from_branch": "main"}
+    assert body["branch"] == expected_branch
+    # The branch must be created BEFORE any file is written to it.
+    assert fake.put_files[-1]["branch"] == expected_branch
+    assert fake.pulls[0]["head"] == expected_branch
 
 
 def test_publish_tampered_file_rejected(broker):
@@ -335,6 +351,93 @@ def test_delete_repos_collection_not_allowed(broker):
 # ---------------------------------------------------------------------------
 # Credential hygiene
 # ---------------------------------------------------------------------------
+def test_github_client_create_branch_gets_base_ref_then_posts_new_ref():
+    """Unit-level test of broker.github.GitHubClient.create_branch, isolated
+    from the FastAPI app. Uses an httpx.MockTransport so no real GitHub call
+    is ever made, and asserts the exact endpoints/method the brief specifies:
+    GET .../git/ref/heads/{from_branch} for the base sha, then POST
+    .../git/refs with that sha."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == "/user":
+            return httpx.Response(200, json={"login": "erku-test"})
+        if request.method == "GET" and request.url.path == "/repos/erku-test/erku-1f916-demo/git/ref/heads/main":
+            return httpx.Response(200, json={"object": {"sha": "base-sha-abc123"}})
+        if request.method == "POST" and request.url.path == "/repos/erku-test/erku-1f916-demo/git/refs":
+            payload = json.loads(request.content)
+            assert payload == {"ref": "refs/heads/broker-publish-xyz", "sha": "base-sha-abc123"}
+            return httpx.Response(201, json={"ref": payload["ref"], "object": {"sha": "base-sha-abc123"}})
+        return httpx.Response(404)
+
+    client = GitHubClient(FAKE_GITHUB_TOKEN, transport=httpx.MockTransport(handler))
+    result = client.create_branch("erku-1f916-demo", "broker-publish-xyz", "main")
+
+    assert result["ref"] == "refs/heads/broker-publish-xyz"
+    assert ("GET", "/repos/erku-test/erku-1f916-demo/git/ref/heads/main") in calls
+    assert ("POST", "/repos/erku-test/erku-1f916-demo/git/refs") in calls
+
+
+def test_github_client_create_branch_raises_without_leaking_token_on_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "erku-test"})
+        return httpx.Response(422)
+
+    client = GitHubClient(FAKE_GITHUB_TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(GitHubClientError) as excinfo:
+        client.create_branch("erku-1f916-demo", "new-branch", "main")
+    assert FAKE_GITHUB_TOKEN not in str(excinfo.value)
+
+
+def test_github_client_put_file_includes_existing_sha_for_update():
+    """put_file must be update-safe: when the contents API reports an
+    existing file (200 + sha), that sha must ride along on the PUT so the
+    write updates the file instead of racing a stale-sha conflict."""
+    put_payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "erku-test"})
+        if request.method == "GET" and request.url.path == "/repos/erku-test/erku-1f916-demo/contents/README.md":
+            assert request.url.params.get("ref") == "main"
+            return httpx.Response(200, json={"sha": "existing-file-sha"})
+        if request.method == "PUT" and request.url.path == "/repos/erku-test/erku-1f916-demo/contents/README.md":
+            payload = json.loads(request.content)
+            put_payloads.append(payload)
+            return httpx.Response(200, json={"content": {"path": "README.md"}, "commit": {"sha": "new-sha"}})
+        return httpx.Response(404)
+
+    client = GitHubClient(FAKE_GITHUB_TOKEN, transport=httpx.MockTransport(handler))
+    client.put_file("erku-1f916-demo", "README.md", base64.b64encode(b"v2").decode(), "update", "main")
+
+    assert put_payloads == [{"message": "update", "content": base64.b64encode(b"v2").decode(),
+                              "branch": "main", "sha": "existing-file-sha"}]
+
+
+def test_github_client_put_file_creates_without_sha_when_absent():
+    """First-create behaviour must be unchanged: when the contents lookup
+    404s, no sha is sent on the PUT."""
+    put_payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "erku-test"})
+        if request.method == "GET" and "/contents/" in request.url.path:
+            return httpx.Response(404)
+        if request.method == "PUT":
+            put_payloads.append(json.loads(request.content))
+            return httpx.Response(201, json={"content": {"path": "README.md"}, "commit": {"sha": "first-sha"}})
+        return httpx.Response(404)
+
+    client = GitHubClient(FAKE_GITHUB_TOKEN, transport=httpx.MockTransport(handler))
+    client.put_file("erku-1f916-demo", "README.md", base64.b64encode(b"v1").decode(), "create", "main")
+
+    assert put_payloads == [{"message": "create", "content": base64.b64encode(b"v1").decode(), "branch": "main"}]
+    assert "sha" not in put_payloads[0]
+
+
 def test_tokens_never_appear_in_any_response_body(broker):
     client, fake, settings = broker
     responses = [
