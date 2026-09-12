@@ -213,7 +213,7 @@ def test_process_abstain_logs_and_marks_handled_without_signing(tmp_path):
 
 
 def test_process_pass_builds_ready_verdict_stores_it_and_never_posts(tmp_path):
-    settings, key = settings_with_key(tmp_path)
+    settings, key = settings_with_key(tmp_path, verifier_enabled=True)
     db = Database(tmp_path / "db"); db.initialize()
     client = RecordingClient({"PASS": "1f916.verdict.v1:tester:41:9:PASS:123"})
     verifier = Verifier(settings, db, client)
@@ -232,6 +232,37 @@ def test_process_pass_builds_ready_verdict_stores_it_and_never_posts(tmp_path):
     second = verifier.process(item)
     assert second["results"] == []
     assert len(db.events("verifier")) == 1  # idempotent: no duplicate signing/logging
+
+
+def test_process_pass_with_verifier_disabled_is_recorded_unsigned_and_never_signs(tmp_path, monkeypatch):
+    import f916.verifier as verifier_module
+    settings, _ = settings_with_key(tmp_path)  # verifier_enabled defaults to False
+    assert settings.verifier_enabled is False
+    db = Database(tmp_path / "db"); db.initialize()
+
+    def must_not_sign(*args, **kwargs):
+        raise AssertionError("must never sign while verifier_enabled is False")
+    monkeypatch.setattr(verifier_module, "build_and_sign_verdict", must_not_sign)
+
+    client = RecordingClient({})  # no preimage GET should ever happen either
+    verifier = Verifier(settings, db, client)
+    consistent_economics = {"outstanding_awarded_atomic": 100, "currently_due_atomic": 40, "overdue_unpaid_atomic": 60}
+    item = listing(economics=consistent_economics,
+                   submissions=[{"id": 9, "handle": "someone", "claim_class": "economic_identity"}])
+
+    result = verifier.process(item)
+    assert result["results"][0] == {"submission_id": 9, "status": "verdict_pending_enable", "verdict": "PASS"}
+    stored = db.get_setting("verifier_verdict:41:9")
+    assert stored["status"] == "verdict_pending_enable" and stored["verdict"] == "PASS"
+    assert "signature" not in stored and "preimage" not in stored
+    events = db.events("verifier")
+    assert events[0]["data"] == {"stage": "verdict_pending_enable", "listing_id": 41, "submission_id": 9, "verdict": "PASS"}
+    assert client.gets == []  # never fetched a preimage
+    assert client.posted == []  # never posted
+
+    second = verifier.process(item)
+    assert second["results"] == []
+    assert len(db.events("verifier")) == 1  # idempotent: one attempt only
 
 
 def test_process_never_raises_and_logs_verifier_error(tmp_path, monkeypatch):

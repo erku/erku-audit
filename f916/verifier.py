@@ -2,13 +2,18 @@
 
 Some listings pay an independent verifier (max_verifiers>0,
 verifier_price_atomic>0) to check a submission and sign a PASS/FAIL verdict.
-This module decides PASS/FAIL/ABSTAIN using only a conservative allowlist of
-objectively-checkable claim classes, signs a ready verdict with the identity
-key exactly like f916.seal.seal_artifact -- but never POSTs it anywhere: the
-verdict-submission endpoint is not confirmed in the contract, so a ready
-verdict is only ever recorded, never sent. This module never touches escrow
-or EIP-712 and never judges subjective quality. ABSTAIN is the default and
-the only outcome outside the allowlist below; when in doubt, ABSTAIN.
+This module always deterministically decides PASS/FAIL/ABSTAIN using only a
+conservative allowlist of objectively-checkable claim classes; that decision
+is computed unconditionally. Ed25519-SIGNING a PASS/FAIL decision with the
+identity key (exactly like f916.seal.seal_artifact) only happens when
+settings.verifier_enabled is true -- while it is false (the default), the
+decision is recorded unsigned as 'verdict_pending_enable' and the identity
+key is never touched. Regardless of verifier_enabled, a verdict is NEVER
+POSTed anywhere: the verdict-submission endpoint is not confirmed in the
+contract, so today verifier_enabled gates signing only, never posting. This
+module never touches escrow or EIP-712 and never judges subjective quality.
+ABSTAIN is the default and the only outcome outside the allowlist below;
+when in doubt, ABSTAIN.
 """
 from __future__ import annotations
 
@@ -152,9 +157,12 @@ def build_and_sign_verdict(client, settings, listing_id, submission_id, verdict,
 
 
 class Verifier:
-    """Restart-safe, conservative verdict engine. Never POSTs a verdict:
-    unless settings.verifier_enabled AND a confirmed submission endpoint
-    exists (it does not), a signed verdict stays 'ready' in the db."""
+    """Restart-safe, conservative verdict engine. The PASS/FAIL/ABSTAIN
+    decision is always computed. Signing with the identity key happens only
+    when settings.verifier_enabled is true; otherwise the decision is stored
+    unsigned as 'verdict_pending_enable'. Never POSTs a verdict either way:
+    no submission endpoint is confirmed, so verifier_enabled today gates
+    signing only, not posting."""
 
     def __init__(self, settings, db, client):
         self.settings, self.db, self.client = settings, db, client
@@ -169,10 +177,17 @@ class Verifier:
         """If not eligible(listing) -> {'status':'not_eligible'}. Otherwise, for
         each submission in listing['submissions'] not by our own handle and not
         already handled (dedup via a db setting key per (listing_id,submission_id)):
-        evaluate_submission; if ABSTAIN, log a 'verifier' event {stage:'abstain'}
-        and mark handled. If PASS/FAIL, build_and_sign_verdict, log a 'verifier'
-        event {stage:'verdict_ready', verdict, submission_id} and store the signed
-        verdict under a db key; mark handled. Do NOT POST the verdict. Restart-safe;
+        evaluate_submission (always computed). If ABSTAIN, log a 'verifier' event
+        {stage:'abstain'} and mark handled -- unchanged, no signing. If PASS/FAIL
+        and settings.verifier_enabled is true, build_and_sign_verdict, log a
+        'verifier' event {stage:'verdict_ready', verdict, submission_id} and store
+        the signed verdict under a db key; mark handled. If PASS/FAIL and
+        settings.verifier_enabled is false (default), do NOT call
+        build_and_sign_verdict or touch the identity key -- instead store the
+        unsigned decision under the same db key with status 'verdict_pending_enable',
+        log a 'verifier' event {stage:'verdict_pending_enable', verdict,
+        submission_id} (no signature), and mark handled (still a one-attempt,
+        idempotent outcome). Do NOT POST the verdict either way. Restart-safe;
         never auto-retries an uncertain external write; never raises out (guard,
         log 'verifier_error')."""
         listing_id = listing.get("listing_id") if isinstance(listing, dict) else None
@@ -209,6 +224,15 @@ class Verifier:
                                               "basis": decision.get("basis")})
                     self.db.set_setting(handled_key, {"status": "handled", "verdict": "ABSTAIN"})
                     results.append({"submission_id": submission_id, "status": "abstain"})
+                    continue
+                if not self.settings.verifier_enabled:
+                    record = {"status": "verdict_pending_enable", "verdict": verdict,
+                              "basis": decision.get("basis"), "claim_class": decision.get("claim_class")}
+                    self.db.set_setting(self._verdict_key(listing_id, submission_id), record)
+                    self.db.log("verifier", {"stage": "verdict_pending_enable", "listing_id": listing_id,
+                                              "submission_id": submission_id, "verdict": verdict})
+                    self.db.set_setting(handled_key, {"status": "handled", "verdict": verdict})
+                    results.append({"submission_id": submission_id, "status": "verdict_pending_enable", "verdict": verdict})
                     continue
                 try:
                     signed = build_and_sign_verdict(self.client, self.settings, listing_id, submission_id,
