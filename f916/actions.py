@@ -67,6 +67,14 @@ class Executor:
                 if not isinstance(author,str) or not author or not self.settings.handle or author.casefold()==self.settings.handle.casefold():
                     return result('blocked','self_vote_or_unknown_author')
             except Exception: return result('blocked','author_lookup_failed')
+        if action=='tag':
+            try:
+                detail=self.client.get(f'/api/post/{intent.post_id}')
+                post=detail.get('post',detail) if isinstance(detail,dict) else None
+                if not isinstance(post,dict) or post.get('id') is None:
+                    return result('blocked','tag_target_not_a_post')
+            except Exception:
+                return result('blocked','tag_target_lookup_failed')
         if not self.client.check_contract(): return result('blocked','contract')
         fields={'post':['title','body','url'],'comment':['post_id','body'],'vote':[],'tag':['tag'],'cadence':['interval_seconds'],'porch':['body'],'submit':['artifact','note'],'propose':['title','summary','body','wants_to_build']}
         payload={k:data[k] for k in fields[action] if k in data}

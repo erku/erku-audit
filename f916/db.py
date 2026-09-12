@@ -80,7 +80,7 @@ class Database:
         now=time.time() if now is None else now; action=intent['action']; fp=fingerprint(intent)
         scope=(str(intent.get('slug','')) if action=='propose' else
                str(intent.get('post_id','')) if action=='comment' else '')
-        limit={'post':1,'comment':5,'vote':50,'submit':10,'propose':3,'tag':50,'cadence':1,'porch':20}.get(action,0)
+        limit={'post':1,'comment':20,'vote':50,'submit':10,'propose':3,'tag':50,'cadence':1,'porch':20}.get(action,0)
         start=now-86400 if action in {'submit','propose'} else now-now%86400
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')

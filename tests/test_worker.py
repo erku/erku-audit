@@ -259,6 +259,30 @@ def test_brain_clears_retry_state_after_later_success(tmp_path):
     assert db.get_setting("llm_retry_state") == {}
 
 
+def test_cycle_snapshot_excludes_posts_already_acted_on_today(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "state.db"); db.initialize()
+    db.log("action", {"intent": {"action": "comment", "post_id": 7, "body": "reviewed"}, "status": "sent"})
+
+    class API:
+        def get(self, path, params=None):
+            if path == "/api/front": return {"posts": [{"id": 7, "author": "a", "title": "t", "body": "evidence"}]}
+            return {}
+
+    class Brain:
+        last_status = "ok"
+        seen_snapshot = None
+        def decide(self, snapshot, task="triage"):
+            self.seen_snapshot = snapshot
+            return []
+
+    brain = Brain()
+    worker = Worker(Settings(data_dir=tmp_path), db, API(), brain)
+    worker.cycle()
+    assert brain.seen_snapshot is not None
+    assert 7 in brain.seen_snapshot["already_acted_post_ids"]
+
+
 def test_daily_audit_rotation_advances_cursor_and_dedupes(tmp_path):
     from f916.loop import Worker
     db = Database(tmp_path / "s.db"); db.initialize()

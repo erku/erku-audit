@@ -131,12 +131,25 @@ class Worker:
                 except Exception as exc:
                     self.db.log("opportunity_error", {"listing_id":listing.get("listing_id"),
                                 "stage":"cycle", "error_type":type(exc).__name__})
+        day_start = int(time.time()) - int(time.time()) % 86400
+        acted_today = []
+        seen_acted = set()
+        for ev in self.db.events('action', 500):
+            d = ev.get('data') if isinstance(ev, dict) else None
+            if not isinstance(d, dict) or ev.get('created_at', 0) < day_start: continue
+            intent = d.get('intent') or {}
+            if intent.get('action') in ('vote', 'comment', 'tag'):
+                pid = intent.get('post_id')
+                if isinstance(pid, int) and pid not in seen_acted:
+                    seen_acted.add(pid); acted_today.append(pid)
+        acted_today = acted_today[:60]
         snapshot = {
             "items":safe_items,
             "inbox":_inbox(me),
             "standing":{"karma":me.get("karma"), "today":me.get("today")} if isinstance(me,dict) else {},
             "listings":_compact(listing_details, ("listing_id","title","condition","funder","amount_atomic","chain_id","token","expiry","funding_mode","settlement_mode","economics","post_id"), 900, 6),
             "grants":_compact(_list(grants,"grants"), ("slug","title","summary","state","sponsor","resource"), 600, 5),
+            "already_acted_post_ids":acted_today,
         }
         digest = hashlib.sha256(json.dumps(redact(snapshot), sort_keys=True, separators=(",",":"), ensure_ascii=False).encode()).hexdigest()
         previous = self.db.get_setting("snapshot_hash")

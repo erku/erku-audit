@@ -152,7 +152,7 @@ def test_executor_sends_contract_payload_types_and_deduplicates_wire_action(tmp_
     db=Database(tmp_path/'s.db'); db.initialize(); calls=[]
     class API:
         def check_contract(self): return True
-        def get(self,path): return {'post':{'author':'other'}}
+        def get(self,path): return {'post':{'author':'other','id':9}}
         def post(self,path,payload): calls.append((path,payload)); return {'ok':True}
     ex=Executor(Settings(api_key='key',handle='self',mode='auto'),db,API())
     assert ex.dispatch(Intent(action='tag',post_id=9,tag='audit'))['status']=='sent'
@@ -161,11 +161,43 @@ def test_executor_sends_contract_payload_types_and_deduplicates_wire_action(tmp_
     assert calls[-1]==('/api/vote',{'target_id':8,'target_type':'post'})
     assert ex.dispatch(Intent(action='vote',post_id=8))['status']=='blocked'
 
+def test_tag_target_must_be_a_real_post(tmp_path):
+    db=Database(tmp_path/'s.db'); db.initialize(); calls=[]
+    class API:
+        def check_contract(self): return True
+        def get(self,path): return {'post':{'id':9,'author':'other'}}
+        def post(self,path,payload): calls.append((path,payload)); return {'ok':True}
+    ex=Executor(Settings(api_key='key',handle='self',mode='auto'),db,API())
+    assert ex.dispatch(Intent(action='tag',post_id=9,tag='audit'))['status']=='sent'
+    assert calls==[('/api/tag',{'tag':'audit','post_id':9})]
+
+def test_tag_blocks_locally_when_target_is_not_a_post(tmp_path):
+    db=Database(tmp_path/'s.db'); db.initialize(); calls=[]
+    class API:
+        def check_contract(self): return True
+        def get(self,path): return {'post':{'author':'other'}}  # no 'id' -> not a real post
+        def post(self,path,payload): calls.append((path,payload)); return {'ok':True}
+    ex=Executor(Settings(api_key='key',handle='self',mode='auto'),db,API())
+    result=ex.dispatch(Intent(action='tag',post_id=404,tag='audit'))
+    assert result['status']=='blocked' and result['reason']=='tag_target_not_a_post'
+    assert calls==[]
+
+def test_tag_blocks_locally_when_lookup_raises(tmp_path):
+    db=Database(tmp_path/'s.db'); db.initialize(); calls=[]
+    class API:
+        def check_contract(self): return True
+        def get(self,path): raise TimeoutError('down')
+        def post(self,path,payload): calls.append((path,payload)); return {'ok':True}
+    ex=Executor(Settings(api_key='key',handle='self',mode='auto'),db,API())
+    result=ex.dispatch(Intent(action='tag',post_id=404,tag='audit'))
+    assert result['status']=='blocked' and result['reason']=='tag_target_lookup_failed'
+    assert calls==[]
+
 def test_comment_has_daily_limit_and_per_post_cooldown(tmp_path):
     db=Database(tmp_path/'s.db'); db.initialize(); now=(1789250000//86400)*86400+100
     assert db.reserve_action({'action':'comment','post_id':1,'body':'first'},now=now)
     assert not db.reserve_action({'action':'comment','post_id':1,'body':'different'},now=now+1)
     assert db.reserve_action({'action':'comment','post_id':1,'body':'later'},now=now+21601)
-    for post in range(2,5): assert db.reserve_action({'action':'comment','post_id':post,'body':str(post)},now=now+21601)
-    assert not db.reserve_action({'action':'comment','post_id':99,'body':'sixth'},now=now+21601)
+    for post in range(2,20): assert db.reserve_action({'action':'comment','post_id':post,'body':str(post)},now=now+21601)
+    assert not db.reserve_action({'action':'comment','post_id':20,'body':'21st'},now=now+21601)
 

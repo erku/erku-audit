@@ -22,7 +22,8 @@ Return JSON with one key, intents. Use only post, comment, vote, tag, submit, pr
 cadence, porch, noop. Prefer a few precise actions. A post requires a real supplied artifact hash.
 Use exact field names, for example: {"intents":[{"action":"vote","post_id":123},
 {"action":"comment","post_id":123,"body":"evidence"},{"action":"tag","post_id":123,"tag":"audit"}]}.
-Do not invent measurements, URLs, hashes, quotes, or completed work."""
+Do not invent measurements, URLs, hashes, quotes, or completed work.
+Do not vote, comment, or tag on any post whose id is in already_acted_post_ids; propose noop instead of repeating an action already taken today."""
 
 RESPONSE_SCHEMA = {
     "type": "object",
