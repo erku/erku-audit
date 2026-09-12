@@ -118,7 +118,7 @@ def test_auto_submission_requires_public_verified_local_artifact(tmp_path):
     evidence=root/'evidence.json'; evidence.write_bytes(b'proof')
     digest=hashlib.sha256(b'proof').hexdigest()
     url=f'https://github.com/erku/erku-audit/blob/{"a"*40}/artifacts/{digest}.json'
-    db.log('artifact',{'hash':digest,'evidence_files':[str(evidence)],'public_url':url})
+    db.log('artifact',{'listing_id':1,'hash':digest,'evidence_files':[str(evidence)],'public_url':url})
     class API:
         def check_contract(self): return True
         def post(self,*args,**kwargs): return {'id':1}

@@ -25,6 +25,7 @@ class Executor:
         root=(self.settings.data_dir/'artifacts').resolve()
         for event in self.db.events('artifact',1000):
             artifact=event['data']; digest=artifact.get('hash'); url=artifact.get('public_url')
+            if artifact.get('listing_id') != intent.listing_id: continue
             if not digest or not url or digest not in text or url not in text: continue
             for filename in artifact.get('evidence_files',[]):
                 path=Path(filename).resolve()

@@ -109,11 +109,19 @@ class Worker:
                     item = dict(item); item["body"] = item["body"][:2000]
                 safe_items.append(item)
             else: quarantined.append({"source":"front", "id":post.get("id"), "reasons":inspected["reasons"]})
+        listing_details=[]
+        now_seconds=int(time.time())
+        for listing in reversed(_list(listings,'listings')):
+            if len(listing_details)>=6: break
+            if not isinstance(listing,dict) or listing.get('withdrawn_at') or int(listing.get('expiry') or 0)<=now_seconds: continue
+            detail=self._fetch(f"/api/listings/{int(listing['id'])}","submissions")
+            economics=detail.get('economics',{}) if isinstance(detail,dict) else {}
+            if economics.get('available_award_capacity',1)>0: listing_details.append(detail)
         snapshot = {
             "items":safe_items,
             "inbox":_inbox(me),
             "standing":{"karma":me.get("karma"), "today":me.get("today")} if isinstance(me,dict) else {},
-            "listings":_compact(_list(listings,"listings"), ("id","title","acceptance_condition","description","funder","author","asset","amount","price","expires_at"), 600, 8),
+            "listings":_compact(listing_details, ("listing_id","title","condition","funder","amount_atomic","chain_id","token","expiry","funding_mode","settlement_mode","economics","post_id"), 900, 6),
             "grants":_compact(_list(grants,"grants"), ("slug","title","summary","state","sponsor","resource"), 600, 5),
         }
         digest = hashlib.sha256(json.dumps(redact(snapshot), sort_keys=True, separators=(",",":"), ensure_ascii=False).encode()).hexdigest()
