@@ -10,3 +10,4 @@ docs/token.7z
 *.egg-info/
 build/
 dist/
+secrets/
