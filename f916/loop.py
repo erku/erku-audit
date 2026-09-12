@@ -52,7 +52,7 @@ def _inbox(me):
             else:
                 if identity is not None: positions[identity]=len(rows)
                 rows.append({"bucket":bucket, **item})
-    return _compact(rows, ("bucket","id","post_id","comment_id","author","title","body","created_at"), 1500, 30)
+    return _compact(rows, ("bucket","id","post_id","comment_id","author","title","body","created_at"), 800, 15)
 
 
 class Worker:
@@ -98,7 +98,7 @@ class Worker:
         for row in _list(changes,"posts")+_list(newest,"posts")+_list(front,"posts"):
             if isinstance(row,dict) and row.get('id') not in seen:
                 seen.add(row.get('id')); combined.append(row)
-        posts = _compact(combined, ("id","author","title","body","weighted_votes","votes","comments","tags"), 1000, 20)
+        posts = _compact(combined, ("id","author","title","body","weighted_votes","votes","comments","tags"), 600, 10)
         safe_items, quarantined = [], []
         learned = self.db.get_setting("defense_patterns", [])
         for post in posts:
@@ -113,14 +113,20 @@ class Worker:
             "items":safe_items,
             "inbox":_inbox(me),
             "standing":{"karma":me.get("karma"), "today":me.get("today")} if isinstance(me,dict) else {},
-            "listings":_compact(_list(listings,"listings"), ("id","title","acceptance_condition","description","funder","author","asset","amount","price","expires_at"), 1200, 15),
-            "grants":_compact(_list(grants,"grants"), ("slug","title","summary","state","sponsor","resource"), 1200, 10),
+            "listings":_compact(_list(listings,"listings"), ("id","title","acceptance_condition","description","funder","author","asset","amount","price","expires_at"), 600, 8),
+            "grants":_compact(_list(grants,"grants"), ("slug","title","summary","state","sponsor","resource"), 600, 5),
         }
         digest = hashlib.sha256(json.dumps(redact(snapshot), sort_keys=True, separators=(",",":"), ensure_ascii=False).encode()).hexdigest()
         previous = self.db.get_setting("snapshot_hash")
         if digest == previous:
             self.db.log("cycle", {"status":"unchanged", "snapshot_hash":digest})
             return {"changed":False}
+        last_ok=next((event for event in self.db.events('llm',1000) if event['data'].get('status')=='ok' and event['data'].get('task')=='triage'),None)
+        urgent=any(item.get('bucket')!='in_threads_you_joined' for item in snapshot['inbox'])
+        minimum_interval=1800 if urgent else 10800
+        if last_ok and time.time()-last_ok['created_at'] < minimum_interval:
+            self.db.log('cycle',{'status':'throttled','snapshot_hash':digest,'urgent':urgent,'retry_after_seconds':int(minimum_interval-(time.time()-last_ok['created_at']))})
+            return {'changed':True,'processed':False,'throttled':True}
         for incident in quarantined:
             self.db.log("quarantine", incident)
         self.db.log("inbox", {"snapshot_hash":digest, "posts":len(safe_items), "quarantined":len(posts)-len(safe_items)})

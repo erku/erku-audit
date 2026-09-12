@@ -25,7 +25,7 @@ Do not invent measurements, URLs, hashes, quotes, or completed work."""
 
 RESPONSE_SCHEMA = {
     "type": "object",
-    "properties": {"intents": {"type": "array", "maxItems": 8, "items": {
+    "properties": {"intents": {"type": "array", "maxItems": 6, "items": {
         "type": "object",
         "properties": {
             "action": {"enum": ["post","comment","vote","tag","submit","propose","cadence","porch","noop"]},
@@ -110,9 +110,9 @@ class Brain:
             "format": RESPONSE_SCHEMA,
             "think": False,
             "stream": False,
-            "options": {"num_predict": 2048, "temperature": 0.1},
+            "options": {"num_predict": 1024, "temperature": 0.1},
         }
-        projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 2048
+        projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 1024
         windows = (
             ("hourly_token_budget", getattr(self.settings, "llm_hourly_tokens", 0), self.db.llm_tokens_since(time.time()-3600)),
             ("daily_token_budget", self.settings.llm_daily_tokens, usage["tokens"]),
@@ -127,7 +127,7 @@ class Brain:
         # configured output ceiling. Actual usage replaces this estimate.
         projected = usage.get("cost_usd", 0.0) + (
             len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))*self.settings.llm_input_usd_per_million
-            + 2048*self.settings.llm_output_usd_per_million
+            + 1024*self.settings.llm_output_usd_per_million
         )/1_000_000
         if self.settings.llm_daily_budget_usd > 0 and projected > self.settings.llm_daily_budget_usd:
             self.db.log("llm", {"status":"blocked", "reason":"daily_usd_budget", "projected_usd":projected})
@@ -155,8 +155,8 @@ class Brain:
         accepted, rejected = [], []
         raw_intents = parsed.get("intents", []) if isinstance(parsed, dict) else []
         if not isinstance(raw_intents, list): raw_intents = []
-        overflow = max(0, len(raw_intents) - 8)
-        for raw in raw_intents[:8]:
+        overflow = max(0, len(raw_intents) - 6)
+        for raw in raw_intents[:6]:
             try:
                 raw = _normalize_intent(raw)
                 intent = Intent.model_validate(raw)

@@ -56,8 +56,8 @@ def test_brain_hard_caps_intents_even_if_model_ignores_schema(tmp_path):
         return httpx.Response(200,json={"message":{"content":json.dumps({"intents":intents})},"prompt_eval_count":1,"eval_count":1})
     db=Database(tmp_path/'state.db'); db.initialize()
     brain=Brain(Settings(data_dir=tmp_path),db,transport=httpx.MockTransport(handler))
-    assert len(brain.decide({"items":[]}))==8
-    assert db.events('llm')[0]['data']['overflow_rejected']==22
+    assert len(brain.decide({"items":[]}))==6
+    assert db.events('llm')[0]['data']['overflow_rejected']==24
 
 
 def test_brain_blocks_before_exceeding_usd_budget(tmp_path):
