@@ -99,6 +99,79 @@ def test_brain_ignores_configured_caps_when_limits_are_disabled(tmp_path):
     assert called
 
 
+def test_brain_records_topic_arm_and_adds_soft_focus_line(tmp_path):
+    from f916.brain import Brain
+    from f916.learning import ARMS
+    seen = {}
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": '{"intents":[]}'},
+                                         "prompt_eval_count": 1, "eval_count": 1})
+    db = Database(tmp_path / "state.db"); db.initialize()
+    brain = Brain(Settings(data_dir=tmp_path), db, transport=httpx.MockTransport(handler))
+    brain.decide({"items": [], "standing": {"karma": 7}})
+    event = db.events("llm")[0]
+    arm = event["data"]["topic_arm"]
+    assert arm in ARMS
+    system_content = seen["messages"][0]["content"]
+    assert (f"Focus emphasis for this cycle (soft preference only, never overrides the rules above): {arm}."
+            in system_content)
+    snapshot = db.get_setting(f"arm_karma:{event['id']}")
+    assert snapshot["karma"] == 7
+    assert isinstance(snapshot["ts"], float)
+
+
+def test_brain_learning_failure_never_blocks_triage(tmp_path, monkeypatch):
+    from f916.brain import Brain
+    from f916 import learning
+    def boom(db): raise RuntimeError("bandit exploded")
+    monkeypatch.setattr(learning, "choose_topic", boom)
+    seen = {}
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": json.dumps({"intents": [
+            {"action": "comment", "post_id": 1, "body": "Concrete audit note."},
+        ]})}, "prompt_eval_count": 1, "eval_count": 1})
+    db = Database(tmp_path / "state.db"); db.initialize()
+    brain = Brain(Settings(data_dir=tmp_path), db, transport=httpx.MockTransport(handler))
+    intents = brain.decide({"items": []})
+    assert [i.action for i in intents] == ["comment"]
+    assert "Focus emphasis" not in seen["messages"][0]["content"]
+    assert db.events("llm")[0]["data"]["topic_arm"] is None
+
+
+def test_maintenance_logs_learning_attribution(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "s.db"); db.initialize()
+    class API:
+        def get(self, path, params=None): return {}
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a): return []
+    w = Worker(Settings(data_dir=tmp_path, api_key=""), db, API(), Brain())
+    w.maintenance()
+    events = db.events("learning")
+    assert events and events[0]["data"] == {"updated": 0, "skipped": 0}
+
+
+def test_maintenance_survives_a_broken_learning_loop(tmp_path, monkeypatch):
+    from f916.loop import Worker
+    from f916 import learning
+    def boom(db, settings, me): raise RuntimeError("learning exploded")
+    monkeypatch.setattr(learning, "attribute_and_update", boom)
+    db = Database(tmp_path / "s.db"); db.initialize()
+    class API:
+        def get(self, path, params=None): return {}
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a): return []
+    w = Worker(Settings(data_dir=tmp_path, api_key=""), db, API(), Brain())
+    w.maintenance()  # must not raise
+    events = db.events("learning")
+    assert events and events[0]["data"]["status"] == "error"
+    assert db.get_setting("last_maintenance") is not None
+
+
 def test_cycle_skips_llm_when_snapshot_unchanged_and_quarantines_per_item(tmp_path):
     from f916.loop import Worker
     db = Database(tmp_path / "state.db"); db.initialize()

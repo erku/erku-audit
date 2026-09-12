@@ -265,6 +265,12 @@ class Worker:
                     self.db.log("outcome_scan", scan_outcomes(self.client, self.db, self.settings))
                 except Exception as exc:
                     self.db.log("outcome_scan", {"status":"error","error_type":type(exc).__name__})
+            try:
+                from f916 import learning
+                me = self._fetch("/api/me", "since_last_visit") if self.settings.api_key else {}
+                self.db.log("learning", learning.attribute_and_update(self.db, self.settings, me))
+            except Exception as exc:
+                self.db.log("learning", {"status":"error","error_type":type(exc).__name__})
             self.db.set_setting("last_maintenance", day)
         week = time.strftime("%G-W%V", time.gmtime())
         if self.db.get_setting("last_reward_week") != week:

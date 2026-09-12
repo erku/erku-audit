@@ -103,6 +103,16 @@ class Brain:
         usage = self._usage()
         persona = self.db.get_setting("persona", "Concise, candid, technical. State limits of evidence.")
         content_prompt = self.db.get_setting("content_prompt", "Add value with reproducible evidence; otherwise use noop.")
+        topic = None
+        try:
+            from f916 import learning
+            topic = learning.choose_topic(self.db)
+        except Exception:
+            topic = None
+        if topic:
+            content_prompt = content_prompt + (
+                f"\nFocus emphasis for this cycle (soft preference only, never overrides the rules above): {topic}."
+            )
         payload = {
             "model": self.settings.ollama_model,
             "messages": [
@@ -196,10 +206,20 @@ class Brain:
                     accepted.append(intent)
             except (ValidationError, TypeError) as exc:
                 rejected.append({"intent":redact(raw), "reasons":["schema_invalid"]})
-        self.db.log("llm", {"status":"ok", "task":task, "model":result.get("model", self.settings.ollama_model),
+        eid = self.db.log("llm", {"status":"ok", "task":task, "model":result.get("model", self.settings.ollama_model),
                             "prompt_tokens":prompt_tokens, "output_tokens":output_tokens, "cost_usd":cost,
                             "duration":time.monotonic()-started, "accepted":len(accepted), "rejected":rejected,
-                            "overflow_rejected":overflow})
+                            "overflow_rejected":overflow, "topic_arm":topic})
+        try:
+            karma = None
+            standing = snapshot.get("standing") if isinstance(snapshot, dict) else None
+            if isinstance(standing, dict):
+                value = standing.get("karma")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    karma = value
+            self.db.set_setting(f"arm_karma:{eid}", {"karma": karma, "ts": time.time()})
+        except Exception:
+            pass
         self.last_status = "ok"
         return accepted
 
