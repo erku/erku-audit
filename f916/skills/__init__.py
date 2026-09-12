@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, parse_qsl
 from invariants import redact
 from defense.regress import run_regression
 
-SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam'})
+SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam','rail-report'})
 
 
 def _gate(target, params):
@@ -65,6 +65,15 @@ def _rail(target, params):
     return {'status':'findings' if findings else 'consistent','findings':findings,'summary':'Compared supplied award and receipt totals as atomic integers for one asset; no chain or source-authenticity verification.', 'asset':list(assets)[0], 'totals':[str(t) for t in totals]}
 
 
+def _rail_report(target, params):
+    verdict = target.get('verdict')
+    quoted = target.get('quoted')
+    if verdict not in {'BID', 'CAUTION', 'SKIP'} or not isinstance(quoted, dict):
+        return {'status':'inconclusive','findings':[],'summary':'rail-report requires quoted public fields and a verdict.'}
+    summary = f"Stranger-checkable rail report for listing {target.get('listing_id')}: {verdict}. {target.get('verdict_basis','')}"
+    return {'status':'consistent','findings':[],'summary':summary,'quoted':quoted,'verdict':verdict,'source':target.get('source')}
+
+
 def run(skill, target, params, output_dir, binding=None):
     if skill not in SKILLS: raise ValueError('Unsupported skill')
     encoded = json.dumps({'target':target,'params':params}, allow_nan=False).encode()
@@ -73,6 +82,7 @@ def run(skill, target, params, output_dir, binding=None):
     if skill == 'gate-probe': result = _gate(target,params)
     elif skill == 'leak-probe': result = _leak(target,params)
     elif skill == 'rail-audit': result = _rail(target,params)
+    elif skill == 'rail-report': result = _rail_report(target,params)
     elif skill == 'self-redteam':
         regression = run_regression()
         result = {'status':'findings' if regression['missed'] else 'consistent','summary':'Local deterministic attack corpus regression; not exhaustive security assurance.','findings':regression}

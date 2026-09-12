@@ -1,0 +1,6 @@
+[
+  {"id":"rail-state-self-report","skill":"rail-report","builder":"rail_self_report",
+   "title_contains":["stranger"]},
+  {"id":"award-slot-census","skill":"rail-report","builder":"rail_self_report",
+   "title_contains":["award","census"]}
+]

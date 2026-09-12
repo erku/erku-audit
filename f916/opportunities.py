@@ -9,6 +9,7 @@ from invariants import redact
 from .models import Intent
 from .seal import seal_artifact
 from .skills import SKILLS, run as run_skill
+from .templates import BUILDERS, load_templates, match_template
 
 
 AUDIT_SKILLS = frozenset({"gate-probe", "leak-probe", "rail-audit"})
@@ -68,6 +69,23 @@ def evaluate_opportunity(listing):
 
     audit = listing.get("audit")
     if not isinstance(audit, dict):
+        # No operator-provided structured audit. Fall back to the curated,
+        # operator-maintained bounty-template allowlist -- the allowlist,
+        # not the listing author, is the trust boundary here -- before
+        # giving up as unsupported. Structured signals only; no prose is
+        # parsed into parameters.
+        templates = load_templates()
+        tpl = match_template(listing, templates)
+        if tpl is not None:
+            try:
+                target = BUILDERS[tpl["builder"]](listing)
+            except (KeyError, ValueError):
+                target = None
+            if target is not None:
+                return {"classification": "supported", "reason": "curated_template",
+                        "listing_id": listing_id, "source_hash": source_hash,
+                        "skill": tpl.get("skill", "rail-report"), "target": target,
+                        "params": {}, "template_id": tpl["id"]}
         return {"classification": "unsupported", "reason": "no_structured_safe_audit",
                 "listing_id": listing_id, "source_hash": source_hash}
     skill, target, params = audit.get("skill"), audit.get("target"), audit.get("params", {})
