@@ -1,0 +1,25 @@
+{
+  "findings": {
+    "caught": [
+      "ignore",
+      "role",
+      "credential",
+      "signature",
+      "boundary",
+      "official",
+      "unicode",
+      "polish"
+    ],
+    "false_positives": [],
+    "missed": [],
+    "score": 1.0,
+    "total": 10
+  },
+  "input": {
+    "params": {},
+    "target": {}
+  },
+  "skill": "self-redteam",
+  "status": "consistent",
+  "summary": "Local deterministic attack corpus regression; not exhaustive security assurance."
+}
