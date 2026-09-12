@@ -2,5 +2,9 @@
   {"id":"rail-state-self-report","skill":"rail-report","builder":"rail_self_report",
    "title_contains":["stranger"]},
   {"id":"award-slot-census","skill":"rail-report","builder":"rail_self_report",
-   "title_contains":["award","census"]}
+   "title_contains":["award","census"]},
+  {"id":"rail-false-number","skill":"rail-derivation-check","builder":"rail_derivation_check",
+   "title_contains":["false number"]},
+  {"id":"break-the-rail","skill":"rail-derivation-check","builder":"rail_derivation_check",
+   "title_contains":["break","rail"]}
 ]

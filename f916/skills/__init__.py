@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, parse_qsl
 from invariants import redact
 from defense.regress import run_regression
 
-SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam','rail-report'})
+SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam','rail-report','rail-derivation-check'})
 
 
 def _gate(target, params):
@@ -65,6 +65,66 @@ def _rail(target, params):
     return {'status':'findings' if findings else 'consistent','findings':findings,'summary':'Compared supplied award and receipt totals as atomic integers for one asset; no chain or source-authenticity verification.', 'asset':list(assets)[0], 'totals':[str(t) for t in totals]}
 
 
+def _rail_derivation(target, params):
+    economics = target.get('economics') if isinstance(target, dict) else None
+    listing_id = target.get('listing_id') if isinstance(target, dict) else None
+    if not isinstance(economics, dict):
+        return {'status':'inconclusive','findings':[],'summary':'No checkable published economic identities in the supplied fields.'}
+
+    def parse_nonneg_int(value):
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return None
+
+    findings = []
+    for field, value in economics.items():
+        if field.endswith('_atomic') and parse_nonneg_int(value) is None:
+            findings.append({'field': field, 'issue': 'not_a_nonnegative_integer', 'value': value})
+
+    n_checked = 0
+
+    outstanding = parse_nonneg_int(economics['outstanding_awarded_atomic']) if 'outstanding_awarded_atomic' in economics else None
+    currently_due = parse_nonneg_int(economics['currently_due_atomic']) if 'currently_due_atomic' in economics else None
+    overdue = parse_nonneg_int(economics['overdue_unpaid_atomic']) if 'overdue_unpaid_atomic' in economics else None
+    if outstanding is not None and currently_due is not None and overdue is not None:
+        n_checked += 1
+        computed = currently_due + overdue
+        if outstanding != computed:
+            findings.append({
+                'identity': 'outstanding_awarded_atomic == currently_due_atomic + overdue_unpaid_atomic',
+                'served': str(outstanding),
+                'computed': str(computed),
+            })
+
+    max_awards = parse_nonneg_int(economics['max_awards']) if 'max_awards' in economics else None
+    awarded_slots_used = parse_nonneg_int(economics['awarded_slots_used']) if 'awarded_slots_used' in economics else None
+    available = parse_nonneg_int(economics['available_award_capacity']) if 'available_award_capacity' in economics else None
+    if (max_awards is not None and awarded_slots_used is not None and available is not None
+            and awarded_slots_used <= max_awards):
+        n_checked += 1
+        computed = max_awards - awarded_slots_used
+        if available != computed:
+            findings.append({
+                'identity': 'available_award_capacity == max_awards - awarded_slots_used',
+                'served': str(available),
+                'computed': str(computed),
+            })
+
+    if n_checked == 0:
+        return {'status':'inconclusive','findings':[],'summary':'No checkable published economic identities in the supplied fields.'}
+
+    return {
+        'status': 'findings' if findings else 'consistent',
+        'findings': findings,
+        'summary': (f'Recomputed {n_checked} published rail identities for listing {listing_id}; '
+                    f'{len(findings)} mismatch(es). Structured public fields only, no chain verification.'),
+    }
+
+
 def _rail_report(target, params):
     verdict = target.get('verdict')
     quoted = target.get('quoted')
@@ -83,6 +143,7 @@ def run(skill, target, params, output_dir, binding=None):
     elif skill == 'leak-probe': result = _leak(target,params)
     elif skill == 'rail-audit': result = _rail(target,params)
     elif skill == 'rail-report': result = _rail_report(target,params)
+    elif skill == 'rail-derivation-check': result = _rail_derivation(target,params)
     elif skill == 'self-redteam':
         regression = run_regression()
         result = {'status':'findings' if regression['missed'] else 'consistent','summary':'Local deterministic attack corpus regression; not exhaustive security assurance.','findings':regression}

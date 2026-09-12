@@ -149,4 +149,26 @@ def rail_self_report(listing: dict) -> dict:
     }
 
 
-BUILDERS = {"rail_self_report": rail_self_report}
+def rail_derivation_check(listing: dict) -> dict:
+    """Build the rail-derivation-check skill TARGET from the listing's OWN
+    already-fetched public economics fields (no network, no prose parsing).
+
+    Never raises for a well-formed listing missing an economics block;
+    raises ValueError('no_listing_id') only when the listing carries no
+    usable id (the caller only calls this after a template matched a real
+    listing)."""
+    if not isinstance(listing, dict):
+        raise ValueError("no_listing_id")
+    listing_id = _identity_int(listing.get("listing_id"))
+    if listing_id is None:
+        listing_id = _identity_int(listing.get("id"))
+    if listing_id is None:
+        raise ValueError("no_listing_id")
+
+    economics = listing.get("economics")
+    economics = economics if isinstance(economics, dict) else {}
+
+    return {"listing_id": listing_id, "economics": economics}
+
+
+BUILDERS = {"rail_self_report": rail_self_report, "rail_derivation_check": rail_derivation_check}

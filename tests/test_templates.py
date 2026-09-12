@@ -5,7 +5,7 @@ import pytest
 
 from f916 import skills
 from f916.opportunities import evaluate_opportunity
-from f916.templates import BUILDERS, load_templates, match_template, rail_self_report
+from f916.templates import BUILDERS, load_templates, match_template, rail_self_report, rail_derivation_check
 
 
 TEMPLATES = [
@@ -28,9 +28,10 @@ def listing(**updates):
 def test_load_templates_reads_the_real_seed_file():
     templates = load_templates()
     ids = {t["id"] for t in templates}
-    assert {"rail-state-self-report", "award-slot-census"} <= ids
+    assert {"rail-state-self-report", "award-slot-census",
+            "rail-false-number", "break-the-rail"} <= ids
     for t in templates:
-        assert t["skill"] == "rail-report"
+        assert t["skill"] in {"rail-report", "rail-derivation-check"}
         assert t["builder"] in BUILDERS
 
 
@@ -161,3 +162,112 @@ def test_evaluate_opportunity_project_required_wins_over_template_match():
                     economics={"available_award_capacity": 3}, escrow_address="0xesc")
     evaluation = evaluate_opportunity(item)
     assert evaluation["classification"] == "project_required"
+
+
+# --- _rail_derivation ---------------------------------------------------------
+
+def test_rail_derivation_consistent_economics():
+    target = {"listing_id": 41, "economics": {
+        "outstanding_awarded_atomic": "500", "currently_due_atomic": "300", "overdue_unpaid_atomic": "200",
+        "max_awards": 10, "awarded_slots_used": 4, "available_award_capacity": 6,
+    }}
+    result = skills._rail_derivation(target, {})
+    assert result["status"] == "consistent"
+    assert result["findings"] == []
+
+
+def test_rail_derivation_flags_outstanding_mismatch():
+    target = {"listing_id": 41, "economics": {
+        "outstanding_awarded_atomic": "999", "currently_due_atomic": "300", "overdue_unpaid_atomic": "200",
+    }}
+    result = skills._rail_derivation(target, {})
+    assert result["status"] == "findings"
+    finding = result["findings"][0]
+    assert finding["identity"] == "outstanding_awarded_atomic == currently_due_atomic + overdue_unpaid_atomic"
+    assert finding["served"] == "999"
+    assert finding["computed"] == "500"
+
+
+def test_rail_derivation_flags_capacity_mismatch():
+    target = {"listing_id": 41, "economics": {
+        "max_awards": 10, "awarded_slots_used": 4, "available_award_capacity": 999,
+    }}
+    result = skills._rail_derivation(target, {})
+    assert result["status"] == "findings"
+    finding = result["findings"][0]
+    assert finding["identity"] == "available_award_capacity == max_awards - awarded_slots_used"
+    assert finding["served"] == "999"
+    assert finding["computed"] == "6"
+
+
+def test_rail_derivation_missing_economics_is_inconclusive():
+    result = skills._rail_derivation({"listing_id": 41}, {})
+    assert result == {"status": "inconclusive", "findings": [],
+                       "summary": "No checkable published economic identities in the supplied fields."}
+    result = skills._rail_derivation({"listing_id": 41, "economics": "not-a-dict"}, {})
+    assert result["status"] == "inconclusive"
+    result = skills._rail_derivation({"listing_id": 41, "economics": {}}, {})
+    assert result["status"] == "inconclusive"
+
+
+def test_rail_derivation_flags_non_integer_atomic_field():
+    target = {"listing_id": 41, "economics": {
+        "outstanding_awarded_atomic": "not-a-number", "currently_due_atomic": "300", "overdue_unpaid_atomic": "200",
+        "max_awards": 10, "awarded_slots_used": 4, "available_award_capacity": 6,
+    }}
+    result = skills._rail_derivation(target, {})
+    assert result["status"] == "findings"
+    assert {"field": "outstanding_awarded_atomic", "issue": "not_a_nonnegative_integer",
+            "value": "not-a-number"} in result["findings"]
+    # The other identity (capacity) is still checkable and consistent, and the
+    # broken identity is skipped rather than falsely flagged as a mismatch.
+    assert not any(f.get("identity", "").startswith("outstanding_awarded_atomic ==") for f in result["findings"])
+
+
+def test_rail_derivation_never_raises_on_malformed_input():
+    assert skills._rail_derivation({}, {})["status"] == "inconclusive"
+    assert skills._rail_derivation({"economics": None}, {})["status"] == "inconclusive"
+    assert skills._rail_derivation({"economics": {"outstanding_awarded_atomic": None}}, {})["status"] == "inconclusive"
+
+
+# --- rail_derivation_check builder --------------------------------------------
+
+def test_rail_derivation_check_builds_target_with_listing_id_and_economics():
+    target = rail_derivation_check(listing(economics={"outstanding_awarded_atomic": "500"}))
+    assert target == {"listing_id": 41, "economics": {"outstanding_awarded_atomic": "500"}}
+    # Missing/non-dict economics becomes {}, never raises.
+    target = rail_derivation_check(listing())
+    assert target == {"listing_id": 41, "economics": {}}
+
+
+def test_rail_derivation_check_raises_without_a_usable_listing_id():
+    with pytest.raises(ValueError, match="no_listing_id"):
+        rail_derivation_check({"title": "no id here"})
+    with pytest.raises(ValueError, match="no_listing_id"):
+        rail_derivation_check({"listing_id": -1})
+
+
+# --- rail-derivation-check skill via f916.skills.run --------------------------
+
+def test_rail_derivation_check_skill_writes_consistent_evidence(tmp_path):
+    target = rail_derivation_check(listing(economics={
+        "outstanding_awarded_atomic": "500", "currently_due_atomic": "300", "overdue_unpaid_atomic": "200",
+    }))
+    result = skills.run("rail-derivation-check", target, {}, tmp_path)
+
+    assert result["status"] == "consistent"
+    evidence_path = result["evidence_files"][0]
+    content = open(evidence_path, "rb").read()
+    assert hashlib.sha256(content).hexdigest() == result["hash"]
+
+
+# --- evaluate_opportunity routes the derivation-check template ---------------
+
+def test_evaluate_opportunity_matches_rail_false_number_template():
+    item = listing(title="Bounty: find a false number in the rail",
+                    economics={"outstanding_awarded_atomic": "999", "currently_due_atomic": "300",
+                               "overdue_unpaid_atomic": "200"})
+    evaluation = evaluate_opportunity(item)
+    assert evaluation["classification"] == "supported"
+    assert evaluation["skill"] == "rail-derivation-check"
+    assert evaluation["template_id"] == "rail-false-number"
