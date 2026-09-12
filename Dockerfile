@@ -5,6 +5,7 @@ COPY pyproject.toml /app/
 RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home agent && mkdir -p /data && chown agent:agent /data
 COPY f916 /app/f916
+COPY sandbox /app/sandbox
 COPY broker /app/broker
 COPY dashboard /app/dashboard
 COPY defense /app/defense

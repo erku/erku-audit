@@ -60,3 +60,29 @@ services:
       timeout: 6s
       retries: 3
       start_period: 10s
+  # Isolated test sandbox runner (Task S). Deliberately NOT built on the
+  # x-common anchor: it must never receive env_file .env / API_KEY. It talks
+  # to the worker ONLY via the shared sandbox-jobs volume (file IPC) and has
+  # no network access at all, so it is safe to run LLM-generated project
+  # tests here. Dormant by default: only started under the "sandbox" profile.
+  sandbox-runner:
+    build: .
+    image: f916-local:latest
+    profiles: ["sandbox"]
+    command: [python, -m, sandbox.runner]
+    environment:
+      SANDBOX_JOBS_DIR: /data/sandbox-jobs
+      SANDBOX_TIMEOUT_SECONDS: '120'
+    volumes:
+      - ./data/sandbox-jobs:/data/sandbox-jobs
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+    init: true
