@@ -160,3 +160,19 @@ def test_worker_sends_open_listing_details_to_opportunity_runner(tmp_path):
 
     Worker(Settings(data_dir=tmp_path), db, API(), Brain(), opportunity_runner=Opportunities()).cycle()
     assert seen == [41]
+
+
+def test_evaluate_accepts_api_string_id_and_rejects_mismatch():
+    # The live API serves id as the string "listing-<n>" alongside int listing_id.
+    ok = evaluate_opportunity(listing(id="listing-41"))
+    assert ok["classification"] == "supported"
+    assert ok["listing_id"] == 41
+
+    mismatch = evaluate_opportunity(listing(id="listing-99"))
+    assert mismatch["classification"] == "unsupported"
+    assert mismatch["reason"] == "invalid_listing_identity"
+
+    id_only = evaluate_opportunity({"id": "listing-7", "title": "t", "condition": "c",
+                                    "audit": {"skill": "gate-probe", "target": {"blocked_tokens": ["rm -rf"]}, "params": {}}})
+    assert id_only["classification"] == "supported"
+    assert id_only["listing_id"] == 7

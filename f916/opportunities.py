@@ -33,18 +33,33 @@ def _source_hash(listing):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _identity_int(value):
+    """Extract a positive int identity from an int, a numeric string, or the
+    API's ``"listing-<n>"`` resource-id form. Returns None on anything else."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        candidate = value[len("listing-"):] if value.startswith("listing-") else value
+        if candidate.isdigit():
+            n = int(candidate)
+            return n if n > 0 else None
+    return None
+
+
 def evaluate_opportunity(listing):
     """Classify data only; community prose is never interpreted as a command."""
     if not isinstance(listing, dict):
         return {"classification": "unsupported", "reason": "listing_not_an_object", "source_hash": hashlib.sha256(b"null").hexdigest()}
-    try:
-        listing_id = int(listing.get("listing_id", listing.get("id")))
-        if listing_id <= 0: raise ValueError()
-        if listing.get("listing_id") is not None and listing.get("id") is not None and int(listing["id"]) != listing_id:
-            raise ValueError()
-        source_hash = _source_hash(listing)
-    except (TypeError, ValueError):
+    # The API serves listing_id as an int and id as the string "listing-<n>";
+    # accept either form and reject only when two present identities disagree.
+    primary = listing.get("listing_id")
+    listing_id = _identity_int(primary if primary is not None else listing.get("id"))
+    id_identity = _identity_int(listing.get("id")) if listing.get("id") is not None else None
+    if listing_id is None or (id_identity is not None and primary is not None and id_identity != listing_id):
         return {"classification": "unsupported", "reason": "invalid_listing_identity", "source_hash": _source_hash(listing)}
+    source_hash = _source_hash(listing)
 
     text = f'{listing.get("title", "")}\n{listing.get("condition", "")}'.casefold()
     if any(term in text for term in PROJECT_TERMS):
