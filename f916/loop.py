@@ -131,6 +131,16 @@ class Worker:
                 except Exception as exc:
                     self.db.log("opportunity_error", {"listing_id":listing.get("listing_id"),
                                 "stage":"cycle", "error_type":type(exc).__name__})
+        if self.settings.api_key:
+            try:
+                from f916.verifier import Verifier
+                v = Verifier(self.settings, self.db, self.client)
+                for listing in getattr(self, "_last_listing_details", []):
+                    try: v.process(listing)
+                    except Exception as exc:
+                        self.db.log("verifier_error", {"listing_id": listing.get("listing_id"), "error_type": type(exc).__name__})
+            except Exception as exc:
+                self.db.log("verifier_error", {"stage":"cycle","error_type": type(exc).__name__})
         day_start = int(time.time()) - int(time.time()) % 86400
         acted_today = []
         seen_acted = set()
