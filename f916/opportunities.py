@@ -7,9 +7,10 @@ from pathlib import Path
 
 from invariants import redact
 from .broker_client import BrokerClient
-from .builder import build_project
+from .builder import build_project, build_project_from_files
 from .models import Intent
 from .project_policy import load_project_templates, qualify
+from .sandbox_client import SandboxClient
 from .seal import seal_artifact
 from .skills import SKILLS, run as run_skill
 from .templates import BUILDERS, load_templates, match_template
@@ -118,13 +119,21 @@ class OpportunityRunner:
     PROJECT_TERMINAL = frozenset({
         "project_unqualified", "project_uncertain", "project_submitted",
         "project_queued", "project_submission_failed", "project_error",
+        "project_llm_disabled", "project_generation_empty",
+        "project_build_rejected", "project_tests_failed",
     })
 
     def __init__(self, settings, db, client, executor, publisher=None, sealer=seal_artifact,
-                 broker_client_cls=BrokerClient):
+                 broker_client_cls=BrokerClient, brain=None, sandbox_client_cls=SandboxClient):
         self.settings, self.db, self.client = settings, db, client
         self.executor, self.publisher, self.sealer = executor, publisher, sealer
         self.broker_client_cls = broker_client_cls
+        # LLM-authored projects (Task P): `brain` is only ever consulted when
+        # a qualified spec is flagged `needs_llm` AND
+        # `settings.project_llm_enabled` is true -- see run_project. Tests
+        # inject a fake; production wiring injects the real f916.brain.Brain.
+        self.brain = brain
+        self.sandbox_client_cls = sandbox_client_cls
         # Defense in depth: if the broker token is ever accidentally placed in
         # a logged event's text, db.log's redact() will scrub it (redact()
         # ignores falsy entries, so this is a no-op while broker_token is '').
@@ -238,6 +247,16 @@ class OpportunityRunner:
         any unexpected exception is caught, logged as `project_error`
         (no secrets), and turned into a terminal state rather than crashing
         the opportunity cycle.
+
+        A `needs_llm` spec is built by `Brain.generate_project` instead of
+        the deterministic renderer; that model output is DATA ONLY -- it is
+        never executed by this process, only written through the same
+        builder safety gates and run through the isolated `SandboxClient`.
+        The whole branch is inert unless `settings.project_llm_enabled` is
+        true (a broker is already required to reach run_project at all).
+        Passing sandbox tests is a hard gate: only then does the LLM path
+        converge onto the exact same publish -> evidence -> seal -> submit
+        steps as the deterministic path below.
         """
         key = self._project_key(evaluation)
         state = self.db.get_setting(key, {})
@@ -261,7 +280,44 @@ class OpportunityRunner:
 
             if "manifest" not in state:
                 workspace = Path(self.settings.data_dir) / "projects"
-                manifest = build_project(spec, workspace)
+                if spec.get("needs_llm"):
+                    # Inert unless the operator has both configured a broker
+                    # (already required to reach run_project at all) AND
+                    # explicitly enabled this flag.
+                    if not self.settings.project_llm_enabled:
+                        self.db.log("project", {"listing_id": listing_id, "stage": "llm_gate",
+                                    "status": "disabled"})
+                        return self._save(key, state, "project_llm_disabled")
+                    generated = self.brain.generate_project(spec)
+                    files = generated.get("files") if isinstance(generated, dict) else None
+                    if not files:
+                        self.db.log("project", {"listing_id": listing_id, "stage": "generate",
+                                    "status": "empty"})
+                        return self._save(key, state, "project_generation_empty")
+                    # The model's files are DATA only: they are written to
+                    # disk through the same builder safety gates as the
+                    # deterministic path (name/prefix, secret scan, path
+                    # traversal, size/count limits, tests/ required) and are
+                    # never imported, executed, or shelled out to here.
+                    try:
+                        manifest = build_project_from_files(spec, files, workspace)
+                    except ValueError as exc:
+                        self.db.log("project_error", {"listing_id": listing_id, "stage": "build_from_files",
+                                    "error_type": type(exc).__name__})
+                        return self._save(key, state, "project_build_rejected")
+                    # The only place any of the model's code ever runs: a
+                    # separate, network-less, secret-less sandbox container,
+                    # never this worker process.
+                    sandbox = self.sandbox_client_cls(self.settings)
+                    result = sandbox.run(spec["name"], files, test_path="tests")
+                    self.db.log("project", {"listing_id": listing_id, "stage": "sandbox_test",
+                                "passed": bool(result.get("passed")),
+                                "timed_out": bool(result.get("timed_out"))})
+                    if not result.get("passed"):
+                        # Never publish or submit code whose tests failed.
+                        return self._save(key, state, "project_tests_failed")
+                else:
+                    manifest = build_project(spec, workspace)
                 self.db.log("project", {"listing_id": listing_id, "stage": "build", "name": spec["name"]})
                 state = self._save(key, state, "built", manifest=manifest)
             manifest = state["manifest"]

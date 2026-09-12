@@ -109,14 +109,21 @@ def qualify(evaluation: dict, listing: dict, templates: list, *,
         title = listing.get("title")
         title = title if isinstance(title, str) and title else matched.get("id", name)
         description = f"Deterministic, read-only public report for listing {listing_id}."
+        needs_llm = bool(matched.get("needs_llm"))
 
-        # Content is a snapshot of the listing's OWN structured fields only
-        # -- no prose is parsed or interpreted, and nothing here is a claim
-        # beyond "the listing reported this value".
-        content = {"listing_id": listing_id}
-        for field in ("funder", "economics", "payload_hash", "grant_slug"):
-            if field in listing:
-                content[field] = listing[field]
+        if needs_llm:
+            # The LLM authors the actual project files (see
+            # Brain.generate_project / build_project_from_files); no
+            # deterministic content is prefilled here.
+            content = {"listing_id": listing_id}
+        else:
+            # Content is a snapshot of the listing's OWN structured fields
+            # only -- no prose is parsed or interpreted, and nothing here is
+            # a claim beyond "the listing reported this value".
+            content = {"listing_id": listing_id}
+            for field in ("funder", "economics", "payload_hash", "grant_slug"):
+                if field in listing:
+                    content[field] = listing[field]
 
         return {
             "name": name,
@@ -126,6 +133,7 @@ def qualify(evaluation: dict, listing: dict, templates: list, *,
             "listing_id": listing_id,
             "source_hash": source_hash,
             "content": content,
+            "needs_llm": needs_llm,
         }
     except Exception:
         return None

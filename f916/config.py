@@ -39,6 +39,10 @@ class Settings:
     # verdict is always safe, but posting one requires both this flag AND a
     # confirmed submission endpoint (not yet wired) -- see f916/verifier.py.
     verifier_enabled: bool = field(default_factory=lambda: _bool_env('VERIFIER_ENABLED','false'))
+    # LLM-authored projects (Task P): the model may author a small project's
+    # files as DATA, but that path is inert unless this flag is set AND the
+    # broker is configured -- see f916/opportunities.py OpportunityRunner.run_project.
+    project_llm_enabled: bool = field(default_factory=lambda: _bool_env('PROJECT_LLM_ENABLED','false'))
     # Isolated test sandbox (Task S): the worker drops jobs here for
     # sandbox/runner.py, which runs in a separate, network-less,
     # secret-less container and communicates back via this same directory.

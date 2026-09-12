@@ -272,20 +272,7 @@ def _tree_hash(file_hashes: list[tuple[str, str]]) -> str:
     return hasher.hexdigest()
 
 
-def build_project(spec: dict, workspace: str | Path, *, now=None) -> dict:
-    """Validate spec, render the template into `workspace/<name>/`, and return the
-    manifest dict (also written as `project.manifest.json` in that dir).
-    spec keys: 'name' (must match NAME_RE), 'template' (in TEMPLATES),
-    'title' (str), 'description' (str), optional 'listing_id' (int), 'grant_slug'
-    (str), 'source_hash' (64-hex), plus template-specific 'content' fields.
-    Enforce every rule below; raise ValueError with a clear reason on any breach.
-    Deterministic given the same spec + now."""
-    _validate_spec(spec)
-    if now is None:
-        now = datetime.now(timezone.utc)
-
-    name = spec['name']
-    template = spec['template']
+def _resolve_project_dir(workspace: str | Path, name: str) -> tuple[Path, Path]:
     workspace_path = Path(workspace).resolve()
     project_dir = (workspace_path / name)
     # Path.is_symlink() returns True for a symlink even when it dangles
@@ -298,16 +285,15 @@ def build_project(spec: dict, workspace: str | Path, *, now=None) -> dict:
         project_dir_resolved.relative_to(workspace_path)
     except ValueError:
         _fail('path_escapes_workspace')
+    return workspace_path, project_dir
 
-    render_spec = dict(spec)
 
-    if template == 'python-tool':
-        files = _render_python_tool(render_spec)
-    elif template == 'static-report':
-        files = _render_static_report(render_spec)
-    else:  # pragma: no cover - guarded by _validate_spec
-        _fail('invalid_template')
-
+def _finalize_project(spec: dict, project_dir: Path, name: str, template: str,
+                       files: dict[str, str], now) -> dict:
+    """Shared tail of build_project / build_project_from_files: scan every
+    file for secret-like content, enforce path/size/count limits, write the
+    files, and emit the `1f916.project.v1` manifest. Nothing here executes
+    any of `files` -- it is written to disk as inert data only."""
     for rel_path, text in files.items():
         _check_secret_like(text)
 
@@ -357,3 +343,62 @@ def build_project(spec: dict, workspace: str | Path, *, now=None) -> dict:
     (project_dir / 'project.manifest.json').write_bytes(manifest_json.encode('utf-8'))
 
     return manifest
+
+
+def build_project(spec: dict, workspace: str | Path, *, now=None) -> dict:
+    """Validate spec, render the template into `workspace/<name>/`, and return the
+    manifest dict (also written as `project.manifest.json` in that dir).
+    spec keys: 'name' (must match NAME_RE), 'template' (in TEMPLATES),
+    'title' (str), 'description' (str), optional 'listing_id' (int), 'grant_slug'
+    (str), 'source_hash' (64-hex), plus template-specific 'content' fields.
+    Enforce every rule below; raise ValueError with a clear reason on any breach.
+    Deterministic given the same spec + now."""
+    _validate_spec(spec)
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    name = spec['name']
+    template = spec['template']
+    workspace_path, project_dir = _resolve_project_dir(workspace, name)
+
+    render_spec = dict(spec)
+
+    if template == 'python-tool':
+        files = _render_python_tool(render_spec)
+    elif template == 'static-report':
+        files = _render_static_report(render_spec)
+    else:  # pragma: no cover - guarded by _validate_spec
+        _fail('invalid_template')
+
+    return _finalize_project(spec, project_dir, name, template, files, now)
+
+
+def build_project_from_files(spec: dict, files: dict[str, str], workspace: str | Path, *, now=None) -> dict:
+    """Like `build_project`, but the project's files are supplied by the
+    caller (LLM output) instead of being rendered from `spec['content']`.
+
+    `files` is treated purely as inert DATA: it is never imported, executed,
+    or shelled out to -- it only ever gets written to disk and scanned. Every
+    guard `build_project` enforces on its own rendered files is enforced
+    here too, in the same order: `_validate_spec(spec)`, a secret-like scan
+    of every file, then `_check_paths`/`_reject_if_symlinked` (traversal,
+    symlinks, MAX_FILES/MAX_FILE_BYTES/MAX_TOTAL_BYTES), before anything is
+    written. Additionally requires at least one path under `tests/`
+    (raises ValueError('no_tests') otherwise) -- a project with no tests can
+    never pass the sandbox gate. Deterministic given (spec, files, now)."""
+    _validate_spec(spec)
+    if not isinstance(files, dict) or not files:
+        _fail('no_files')
+    if not all(isinstance(path, str) and isinstance(text, str) for path, text in files.items()):
+        _fail('invalid_file_contents')
+    if not any(path == 'tests' or path.startswith('tests/') for path in files):
+        _fail('no_tests')
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    name = spec['name']
+    template = spec['template']
+    workspace_path, project_dir = _resolve_project_dir(workspace, name)
+
+    return _finalize_project(spec, project_dir, name, template, dict(files), now)

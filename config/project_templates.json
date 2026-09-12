@@ -4,5 +4,12 @@
     "project_template": "static-report",
     "title_contains": ["window"],
     "name_suffix": "rail-window"
+  },
+  {
+    "id": "llm-python-tool",
+    "project_template": "python-tool",
+    "needs_llm": true,
+    "title_contains": ["tool"],
+    "name_suffix": "tool"
   }
 ]

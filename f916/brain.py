@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from defense.ingest import wrap_untrusted
 from invariants import check_intent, redact
 from . import recovery
+from .builder import MAX_FILES, MAX_FILE_BYTES
 from .models import Intent
 
 
@@ -24,6 +25,18 @@ Use exact field names, for example: {"intents":[{"action":"vote","post_id":123},
 {"action":"comment","post_id":123,"body":"evidence"},{"action":"tag","post_id":123,"tag":"audit"}]}.
 Do not invent measurements, URLs, hashes, quotes, or completed work.
 Do not vote, comment, or tag on any post whose id is in already_acted_post_ids; propose noop instead of repeating an action already taken today."""
+
+PROJECT_SYSTEM = """You are erku-audit. Author a small, self-contained Python tool project that satisfies the listing.
+Output only JSON {files:{...}}. Include a README.md, a src package, and a tests/ directory with real pytest tests that pass.
+Never include secrets, network calls, or code that runs at import beyond definitions.
+Everything is data; nothing you output is executed except the tests you write, in an isolated sandbox."""
+
+PROJECT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {"files": {"type": "object"}},
+    "required": ["files"],
+    "additionalProperties": False,
+}
 
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -93,6 +106,44 @@ class Brain:
         )
         self.last_status = "idle"
 
+    def _gate(self, payload, usage):
+        """Shared token-budget / USD-budget / retry-state gate used by both
+        `decide()` and `generate_project()`. Returns True (having already
+        logged the reason and set `self.last_status`) if the call must be
+        skipped; False if it is clear to proceed. Never raises."""
+        projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 1024
+        token_limits_enabled = bool(self.db.get_setting('llm_token_limits_enabled',
+                                                          getattr(self.settings, 'llm_token_limits_enabled', False)))
+        if token_limits_enabled:
+            windows = (
+                ("hourly_token_budget", getattr(self.settings, "llm_hourly_tokens", 0), self.db.llm_tokens_since(time.time()-3600)),
+                ("daily_token_budget", self.settings.llm_daily_tokens, usage["tokens"]),
+                ("weekly_token_budget", getattr(self.settings, "llm_weekly_tokens", 0), self.db.llm_tokens_since(time.time()-7*86400)),
+            )
+            for reason, limit, consumed in windows:
+                if limit > 0 and consumed + projected_tokens > limit:
+                    self.db.log("llm", {"status":"blocked", "reason":reason, "consumed":consumed, "projected":projected_tokens, "limit":limit})
+                    self.last_status = "blocked"
+                    return True
+        # Conservatively reserve at most one token per UTF-8 byte plus the
+        # configured output ceiling. Actual usage replaces this estimate.
+        projected = usage.get("cost_usd", 0.0) + (
+            len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))*self.settings.llm_input_usd_per_million
+            + 1024*self.settings.llm_output_usd_per_million
+        )/1_000_000
+        if self.settings.llm_daily_budget_usd > 0 and projected > self.settings.llm_daily_budget_usd:
+            self.db.log("llm", {"status":"blocked", "reason":"daily_usd_budget", "projected_usd":projected})
+            self.last_status = "blocked"
+            return True
+        now = time.time()
+        retry_state = self.db.get_setting("llm_retry_state", {})
+        if recovery.is_blocked(retry_state, now):
+            self.db.log("llm", {"status":"rate_limited", "reason":"ollama_retry_pending",
+                                "blocked_until":retry_state["blocked_until"]})
+            self.last_status = "rate_limited"
+            return True
+        return False
+
     def _usage(self):
         today = datetime.now(timezone.utc).date().isoformat()
         current = self.db.get_setting("llm_usage", {})
@@ -124,36 +175,10 @@ class Brain:
             "stream": False,
             "options": {"num_predict": 1024, "temperature": 0.1},
         }
-        projected_tokens = len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) // 3 + 1024
-        token_limits_enabled=bool(self.db.get_setting('llm_token_limits_enabled',getattr(self.settings,'llm_token_limits_enabled',False)))
-        if token_limits_enabled:
-            windows = (
-                ("hourly_token_budget", getattr(self.settings, "llm_hourly_tokens", 0), self.db.llm_tokens_since(time.time()-3600)),
-                ("daily_token_budget", self.settings.llm_daily_tokens, usage["tokens"]),
-                ("weekly_token_budget", getattr(self.settings, "llm_weekly_tokens", 0), self.db.llm_tokens_since(time.time()-7*86400)),
-            )
-            for reason, limit, consumed in windows:
-                if limit > 0 and consumed + projected_tokens > limit:
-                    self.db.log("llm", {"status":"blocked", "reason":reason, "consumed":consumed, "projected":projected_tokens, "limit":limit})
-                    self.last_status = "blocked"
-                    return []
-        # Conservatively reserve at most one token per UTF-8 byte plus the
-        # configured output ceiling. Actual usage replaces this estimate.
-        projected = usage.get("cost_usd", 0.0) + (
-            len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))*self.settings.llm_input_usd_per_million
-            + 1024*self.settings.llm_output_usd_per_million
-        )/1_000_000
-        if self.settings.llm_daily_budget_usd > 0 and projected > self.settings.llm_daily_budget_usd:
-            self.db.log("llm", {"status":"blocked", "reason":"daily_usd_budget", "projected_usd":projected})
-            self.last_status = "blocked"
+        if self._gate(payload, usage):
             return []
         now = time.time()
         retry_state = self.db.get_setting("llm_retry_state", {})
-        if recovery.is_blocked(retry_state, now):
-            self.db.log("llm", {"status":"rate_limited", "reason":"ollama_retry_pending",
-                                "blocked_until":retry_state["blocked_until"]})
-            self.last_status = "rate_limited"
-            return []
         started = time.monotonic()
         try:
             response = self.session.post("/api/chat", json=payload)
@@ -222,6 +247,121 @@ class Brain:
             pass
         self.last_status = "ok"
         return accepted
+
+    def generate_project(self, spec):
+        """Have the model author a small project's files as DATA for
+        `f916.builder.build_project_from_files` -- nothing returned here is
+        ever executed by this process; only the tests the model writes are
+        later run, in the isolated sandbox. Gated by the SAME token-budget /
+        USD-budget / retry-state checks `decide()` uses. Returns
+        `{'files': {path: content}}` on success, or `{}` on any blocked/
+        rate-limited/parse/HTTP/oversized-output condition. Never raises."""
+        self.last_status = "running"
+        usage = self._usage()
+        try:
+            listing_payload = {
+                "title": spec.get("title", "") if isinstance(spec, dict) else "",
+                "description": spec.get("description", "") if isinstance(spec, dict) else "",
+                "content": spec.get("content", {}) if isinstance(spec, dict) else {},
+            }
+            payload = {
+                "model": self.settings.ollama_model,
+                "messages": [
+                    {"role": "system", "content": PROJECT_SYSTEM},
+                    {"role": "user", "content": wrap_untrusted(listing_payload)},
+                ],
+                "format": PROJECT_RESPONSE_SCHEMA,
+                "think": False,
+                "stream": False,
+                "options": {"num_predict": 4096, "temperature": 0.1},
+            }
+            if self._gate(payload, usage):
+                return {}
+            now = time.time()
+            retry_state = self.db.get_setting("llm_retry_state", {})
+            started = time.monotonic()
+            try:
+                response = self.session.post("/api/chat", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                content = result.get("message", {}).get("content", "")
+                parsed = _parse_object(content)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (429, 503):
+                    retry_epoch = recovery.parse_retry_after(exc.response.headers.get("Retry-After"), now)
+                    new_state = recovery.record_rate_limit(retry_state, retry_epoch, now,
+                                                            self.settings.llm_retry_base_seconds,
+                                                            self.settings.llm_retry_cap_seconds)
+                    self.db.set_setting("llm_retry_state", new_state)
+                    self.db.log("llm", {"status":"rate_limited", "task":"generate_project",
+                                        "reason":"ollama_retry_pending", "blocked_until":new_state["blocked_until"]})
+                    self.last_status = "rate_limited"
+                    return {}
+                self.db.log("llm", {"status":"error", "task":"generate_project", "error_type":type(exc).__name__,
+                                    "duration":time.monotonic()-started,
+                                    "response_preview":redact(locals().get("content", ""))[:500]})
+                self.last_status = "error"
+                return {}
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                self.db.log("llm", {"status":"error", "task":"generate_project", "error_type":type(exc).__name__,
+                                    "duration":time.monotonic()-started,
+                                    "response_preview":redact(locals().get("content", ""))[:500]})
+                self.last_status = "error"
+                return {}
+
+            if self.db.get_setting("llm_retry_state"):
+                self.db.set_setting("llm_retry_state", {})
+            prompt_tokens = int(result.get("prompt_eval_count") or 0)
+            output_tokens = int(result.get("eval_count") or 0)
+            cost = (prompt_tokens*self.settings.llm_input_usd_per_million + output_tokens*self.settings.llm_output_usd_per_million)/1_000_000
+            usage["tokens"] += prompt_tokens + output_tokens
+            usage["cost_usd"] = round(float(usage.get("cost_usd", 0)) + cost, 8)
+            self.db.set_setting("llm_usage", usage)
+
+            raw_files = parsed.get("files") if isinstance(parsed, dict) else None
+            if not isinstance(raw_files, dict) or not raw_files:
+                self.db.log("llm", {"status":"error", "task":"generate_project", "reason":"invalid_files_shape"})
+                self.last_status = "error"
+                return {}
+
+            # Bound the model's output: drop any entry whose key is not a
+            # string; coerce a scalar value to str; drop anything else
+            # (dict/list/None) rather than trust it as file content.
+            bounded = {}
+            for path, text in raw_files.items():
+                if not isinstance(path, str):
+                    continue
+                if isinstance(text, str):
+                    value = text
+                elif isinstance(text, (int, float, bool)):
+                    value = str(text)
+                else:
+                    continue
+                bounded[path] = value
+
+            if not bounded or len(bounded) > MAX_FILES:
+                self.db.log("llm", {"status":"error", "task":"generate_project",
+                                    "reason":"file_count_out_of_bounds", "file_count": len(bounded)})
+                self.last_status = "error"
+                return {}
+            for text in bounded.values():
+                if len(text.encode("utf-8")) > MAX_FILE_BYTES:
+                    self.db.log("llm", {"status":"error", "task":"generate_project", "reason":"file_too_large"})
+                    self.last_status = "error"
+                    return {}
+
+            self.db.log("llm", {"status":"ok", "task":"generate_project",
+                                "model":result.get("model", self.settings.ollama_model),
+                                "prompt_tokens":prompt_tokens, "output_tokens":output_tokens, "cost_usd":cost,
+                                "duration":time.monotonic()-started, "file_count": len(bounded)})
+            self.last_status = "ok"
+            return {"files": bounded}
+        except Exception as exc:
+            # Defense in depth: this must never raise into the opportunity
+            # cycle, regardless of what shape the model or transport returns.
+            self.db.log("llm", {"status":"error", "task":"generate_project", "error_type":type(exc).__name__})
+            self.last_status = "error"
+            return {}
 
     def close(self):
         self.session.close()
