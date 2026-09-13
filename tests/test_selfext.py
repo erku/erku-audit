@@ -586,3 +586,19 @@ def _all_setting_keys(db):
 def _seen(db):
     seen = db.get_setting("selfext_seen", [])
     return set(seen) if isinstance(seen, list) else set()
+
+
+def test_retry_exhausted_logged_only_once_across_many_scans(tmp_path):
+    # An exhausted gap keeps surfacing every scan; retry_exhausted must be
+    # logged ONCE EVER (persistent flag), not once per scan (log-spam).
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5,
+                             self_extend_retry_max=1, self_extend_retry_cooldown_seconds=0)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "f", "source": IMPURE_SOURCE, "tests": TESTS_SOURCE})
+    sandbox_cls = make_sandbox_client_cls()
+    gap = skill_gap()
+    for _ in range(5):
+        selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)
+    statuses = [e["data"].get("status") for e in db.events("self_extend")]
+    assert statuses.count("retry_exhausted") == 1
+    assert db.get_setting("selfext_attempts", {})[gap["class_key"]].get("exhausted_logged") is True

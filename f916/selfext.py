@@ -349,7 +349,6 @@ def act_on_gaps(gaps, settings, db, brain, sandbox_client_cls=None) -> dict:
     cooldown = getattr(settings, "self_extend_retry_cooldown_seconds", 0)
     proposals_today = _today_proposal_count(db)
     max_proposals = getattr(settings, "self_extend_max_proposals_per_day", 0)
-    exhausted_logged = set()
 
     for gap in gaps[:MAX_GAPS_PER_CALL]:
         class_key = None
@@ -366,12 +365,16 @@ def act_on_gaps(gaps, settings, db, brain, sandbox_client_cls=None) -> dict:
                 count = attempt.get("count", 0) if isinstance(attempt.get("count", 0), (int, float)) else 0
                 last_ts = attempt.get("last_ts", 0) if isinstance(attempt.get("last_ts", 0), (int, float)) else 0
                 if count >= retry_max:
-                    if class_key not in exhausted_logged:
+                    # Log retry_exhausted ONCE EVER (persist a flag in the
+                    # attempt record), not once per scan -- an exhausted gap
+                    # keeps surfacing every scan and would otherwise spam the log.
+                    if not attempt.get("exhausted_logged"):
                         log_data = {"class_key": class_key, "status": "retry_exhausted"}
                         if suggestion in ("template", "skill"):
                             log_data["tier"] = suggestion
                         db.log("self_extend", log_data)
-                        exhausted_logged.add(class_key)
+                        attempt["exhausted_logged"] = True
+                        db.set_setting("selfext_attempts", attempts)
                     continue
                 if now - last_ts < cooldown:
                     continue
