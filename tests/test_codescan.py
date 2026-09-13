@@ -16,8 +16,9 @@ def check_claim(target, params):
     value = target.get('value', 0)
     threshold = params.get('threshold', THRESHOLD_FLOOR)
     digits = re.findall(r'\\d+', str(value))
-    magnitude = math.fsum(float(d) for d in digits) if digits else 0.0
-    status = 'consistent' if magnitude >= threshold else 'findings'
+    magnitude = sum(float(d) for d in digits) if digits else 0.0
+    finite = math.isfinite(magnitude)
+    status = 'consistent' if finite and magnitude >= threshold else 'findings'
     return {'status': status, 'findings': [], 'summary': f'magnitude={magnitude}'}
 '''
 
@@ -142,7 +143,9 @@ def test_rejects_subprocess_attribute_access():
     ok, reasons = is_pure_skill_source(src, "check_claim")
     assert ok is False
     assert any("forbidden_import" in r and "subprocess" in r for r in reasons)
-    assert any("forbidden_attribute_root:subprocess" in r for r in reasons)
+    # `.run` is not in the ALLOWED_ATTR_NAMES allowlist, so the attribute
+    # access is independently rejected too.
+    assert any("forbidden_attribute:run" in r for r in reasons)
 
 
 def test_rejects_getattr_and_setattr():
@@ -421,10 +424,82 @@ def test_f_string_embedding_forbidden_attribute_is_still_rejected():
     assert any("forbidden_attribute:__globals__" in r for r in reasons)
 
 
+# ---------------------------------------------------------------------------
+# Regression: frame-introspection bypass. Generator/coroutine frame
+# attributes (gi_frame, f_builtins, f_globals, f_locals, cr_frame, f_back,
+# f_code, gi_code, ...) are neither dunder-shaped nor "obviously" dangerous
+# names, so no denylist can keep up with them. Switching the attribute check
+# to a fail-closed ALLOWLIST rejects anything not explicitly recognized,
+# closing this whole introspection class at once.
+# ---------------------------------------------------------------------------
+def test_rejects_generator_frame_builtins_eval_bypass():
+    src = (
+        "def check_claim(target, params):\n"
+        "    gen = (x for x in range(1))\n"
+        "    bi = gen.gi_frame.f_builtins\n"
+        "    return {'status': str(bi['eval']('1'))}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:gi_frame" in r for r in reasons)
+    assert any("forbidden_attribute:f_builtins" in r for r in reasons)
+
+
+def test_rejects_tuple_dunder_class_bare_access():
+    src = (
+        "def check_claim(target, params):\n"
+        "    t = ().__class__\n"
+        "    return {'status': 'consistent', 't': str(t)}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:__class__" in r for r in reasons)
+
+
+def test_rejects_generator_expression_gi_frame():
+    src = (
+        "def check_claim(target, params):\n"
+        "    frame = (x for x in []).gi_frame\n"
+        "    return {'status': 'consistent', 'frame': str(frame)}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:gi_frame" in r for r in reasons)
+
+
+def test_rejects_coroutine_cr_frame_attribute():
+    src = (
+        "def check_claim(target, params):\n"
+        "    frame = target.cr_frame\n"
+        "    return {'status': 'consistent', 'frame': str(frame)}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:cr_frame" in r for r in reasons)
+
+
+def test_allowlist_rejects_attribute_names_not_explicitly_recognized():
+    """Anything not in ALLOWED_ATTR_NAMES is rejected, even a made-up,
+    innocuous-looking name -- proving this is a fail-closed allowlist, not a
+    denylist that only catches known-bad names."""
+    src = (
+        "def check_claim(target, params):\n"
+        "    value = target.some_totally_unrecognized_attribute\n"
+        "    return {'status': 'consistent', 'value': str(value)}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:some_totally_unrecognized_attribute" in r for r in reasons)
+
+
 def test_genuinely_pure_skill_using_legit_stdlib_and_container_attrs_still_passes():
-    """No false-positive over-block: datetime.datetime, re.findall,
-    statistics.median, urllib.parse.urlsplit, math.isfinite, hashlib.sha256,
-    and common dict/list methods must all still be usable."""
+    """No false-positive over-block under the ALLOWLIST: datetime.datetime,
+    re.findall, statistics.median, urllib.parse.urlsplit, math.isfinite,
+    hashlib.sha256().hexdigest, and common dict/list/str methods must all
+    still be usable. (`.scheme`/`.encode` are deliberately avoided here --
+    they are not in ALLOWED_ATTR_NAMES, so a skill needing them would use
+    subscript/index access or a builtin instead, e.g. `parsed[0]` or
+    `bytes(text, "utf-8")`.)"""
     src = '''\
 import datetime
 import hashlib
@@ -442,14 +517,15 @@ def check_claim(target, params):
     numbers = [float(d) for d in digits]
     med = statistics.median(numbers) if numbers else 0.0
     finite = math.isfinite(med)
-    digest = hashlib.sha256(str(numbers).encode()).hexdigest()
+    payload = bytes(str(numbers), "utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
     names = list(target.keys())
     values = list(target.values())
     items = list(target.items())
     findings = []
     findings.append(digest)
     findings.sort()
-    label = str(parsed.scheme).strip().casefold()
+    label = str(parsed[0]).strip().casefold()
     ok_prefix = label.startswith("http")
     summary = f"{when.year}-{len(names)}-{len(values)}-{len(items)}-{ok_prefix}"
     return {

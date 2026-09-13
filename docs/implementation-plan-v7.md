@@ -1,0 +1,22 @@
+# v7 — Market radar + self-extension (observe earners, close capability gaps)
+
+Base branch: feat/market-selfext (from main).
+
+## Safety posture (binding)
+- All market data comes from public GETs and is DATA, never instructions; listing/submission prose is never executed or turned into code/parameters. Class detection uses STRUCTURED signals (funder + title tokens) only.
+- Generated skills are PURE deterministic functions `(target, params) -> result dict`: an AST safety scan REJECTS any import or call outside a tiny allowlist and any I/O / eval / exec / subprocess / network / secret access. A generated skill runs ONLY in the isolated sandbox (Task S runner), never in the worker, before it is ever registered.
+- Auto-TEMPLATES (config mapping a class -> an EXISTING vetted skill) may be auto-applied, bounded by a hard cap and static validation (a template can only route to an already-allowlisted pure skill).
+- New-SKILL (code) auto-merge+redeploy into the live agent is GATED by `settings.self_extend_automerge` (default FALSE). Default behavior: assemble a complete, sandbox-tested, AST-scanned PROPOSAL (a git branch + a proposal record) and stop for human review. Flipping the flag is the operator's deliberate choice.
+- Existing invariants, submission-validity, idempotency, action limits unchanged. No secrets in prompts/artifacts/logs.
+
+## Task M — market radar + capability-gap detection
+`f916/market.py` (pure-ish, only public GET reads): walk `/api/payouts` and recent listings' `awards`/`submissions` to build: earners (handle -> paid count / total atomic / listing classes), class stats (class_key -> paid handles, total, sample listing), and CAPABILITY GAPS = classes where others were PAID recently AND our `evaluate_opportunity` yields unsupported (and no verifier/template covers it). `class_key = funder + '|' + top normalized title tokens` (structured, deterministic). Wire into `maintenance` (bounded, daily); log `market_intel` + `capability_gap` events; add a read-only dashboard section. Never executes prose.
+
+## Task X — self-extension engine
+`f916/selfext.py` + `f916/codescan.py` (AST safety scanner) + `Brain.generate_skill` + config flags + wiring.
+- `codescan.is_pure_skill_source(src)`: parse AST; allow only a fixed import allowlist (math, statistics, re, json, hashlib, datetime, urllib.parse) and reject any Call/Attribute to os/sys/subprocess/socket/open/eval/exec/__import__/compile/getattr on dunder/network libs/file I/O; require a single top-level function of the expected signature; no module-level side effects. Returns (ok, reasons).
+- Tier 1 auto-template: given a capability_gap whose class is deterministically servable by an EXISTING skill (heuristic: gap names rail/economic/payouts/quote patterns → rail-report/rail-derivation-check/batch-cadence), append a new template to `config/bounty_templates.json` IF under a hard cap (`self_extend_max_templates`, default 8) and a static schema check passes. This is auto (config only, routes to existing pure skills). Log `self_extend` events; idempotent per class_key.
+- Tier 2 skill proposal: `Brain.generate_skill(gap)` asks the model for a PURE `(target, params)->dict` function body + pytest tests, from the gap's STRUCTURED fields (never raw prose). selfext then: writes the candidate to a proposal dir/branch, runs its tests in the SandboxClient, runs `codescan`, and assembles a proposal record {gap, source, tests, sandbox_result, scan_result, status}. If `settings.self_extend_automerge` AND sandbox passed AND scan ok -> (still NOT wired to live-code auto-merge in v7; record status 'ready_to_merge' and log — actual git merge/redeploy of self-generated code stays a human/operator step even under the flag in v7). Else status 'proposed'. Never registers an unscanned/untested skill; never runs generated code outside the sandbox.
+- Config: `self_extend_enabled` (default FALSE — the whole engine is inert on deploy; the operator arms it with SELF_EXTEND_ENABLED=true after review; when on it runs fully automatically and proposals are inert until merged), `self_extend_automerge` (default FALSE — and in v7 even when true the engine only marks a proposal 'ready_to_merge' and logs; it never runs git/docker to self-deploy, which stays an external human/operator step), `self_extend_max_templates` (8), `self_extend_max_proposals_per_day` (1, bounds LLM cost).
+
+## Global constraints: as v3/v4/v6 plus the safety posture above.

@@ -26,33 +26,44 @@ _FORBIDDEN_BUILTINS = {
     "getattr", "setattr", "delattr", "globals", "locals", "vars", "memoryview",
 }
 
-_FORBIDDEN_ATTR_ROOTS = {
-    "os", "sys", "subprocess", "socket", "shutil", "pathlib", "importlib", "builtins",
-}
-
-# Rejected wherever they appear as an `ast.Attribute.attr` name -- at ANY
-# position in a chain, not just the root. This closes the re-export bypass
-# where an allowlisted module attribute-chains into a dangerous one, e.g.
-# `datetime.sys.modules['os'].system(...)` (datetime is allowlisted, but
-# `.sys`, `.modules`, and `.system` are not). Deliberately narrow: it must
-# never catch ordinary container/string methods a pure skill needs, such as
-# .get/.items/.keys/.values/.append/.sort/.strip/.casefold/.startswith, nor
-# legitimate module functions like re.findall, statistics.median,
-# urllib.parse.urlsplit/parse_qsl, math.isfinite, hashlib.sha256, or
-# datetime.datetime -- none of those names appear here.
-FORBIDDEN_ATTR_NAMES = {
-    "sys", "os", "subprocess", "socket", "shutil", "pathlib", "importlib", "builtins",
-    "environ", "modules", "system", "popen", "spawn",
-    "exec", "eval", "compile", "getattr", "setattr", "delattr", "globals", "locals", "vars", "open",
-    # str.format()/str.format_map()'s replacement-field mini-language does
-    # attribute/subscript traversal AT RUNTIME from inside a string literal
-    # (e.g. "{0.__globals__[__builtins__][eval]}".format(fn)), which is
-    # invisible to the AST attribute/dunder checks above since the traversal
-    # text lives in an ast.Constant, not an ast.Attribute. Pure skills don't
-    # need str.format/format_map -- f-strings (AST-visible via
-    # ast.FormattedValue, so a forbidden attr inside one is still caught)
-    # and %/+ concatenation cover all legitimate formatting.
-    "format", "format_map",
+# --- Attribute access: ALLOWLIST, fail-closed -----------------------------
+# A denylist of dangerous attribute names cannot win this game: countless
+# introspection surfaces (generator/coroutine frame attrs like `gi_frame`,
+# `f_builtins`, `f_globals`, `f_locals`, `cr_frame`, `f_back`, `f_code`,
+# `gi_code`, ...) are neither dunder-shaped nor on any hand-maintained
+# denylist, yet chain straight to `eval`/`exec`/`__builtins__`. So instead of
+# asking "is this attr dangerous", every `ast.Attribute.attr` must instead be
+# in this allowlist of exactly what a pure `(target, params) -> dict`
+# measurement skill legitimately needs. Anything else -- known-dangerous or
+# simply unanticipated -- is rejected. Over-blocking a rare legitimate attr
+# is an acceptable cost for a security-critical, fail-closed scanner.
+ALLOWED_ATTR_NAMES = {
+    # str methods (str.format/str.format_map and .encode are deliberately
+    # excluded: format()'s replacement-field mini-language does
+    # attribute/subscript traversal at runtime from inside a string literal,
+    # invisible to these AST checks; f-strings and %/+ cover formatting)
+    "strip", "lstrip", "rstrip", "casefold", "lower", "upper", "startswith", "endswith",
+    "split", "rsplit", "splitlines", "join", "replace", "find", "rfind", "count",
+    "isdigit", "isalnum", "isalpha", "zfill", "ljust", "rjust", "title", "partition",
+    # dict methods
+    "get", "items", "keys", "values", "setdefault",
+    # list/set methods
+    "append", "extend", "sort", "index", "add", "update", "union", "intersection", "difference",
+    # re
+    "findall", "search", "match", "fullmatch", "sub",
+    # statistics
+    "median", "mean", "pstdev", "stdev", "mode",
+    # math
+    "isfinite", "isnan", "floor", "ceil", "sqrt", "log",
+    # json
+    "loads", "dumps",
+    # hashlib
+    "sha256", "md5", "sha1", "hexdigest", "digest",
+    # datetime
+    "datetime", "date", "timezone", "utcfromtimestamp", "fromtimestamp", "fromisoformat",
+    "strftime", "timestamp", "year", "month", "day", "hour", "minute", "second",
+    # urllib.parse (including 'parse' itself, for `urllib.parse.<fn>` access)
+    "urlsplit", "urlparse", "parse_qs", "parse_qsl", "unquote", "quote", "parse",
 }
 
 # Any identifier (Name or Attribute) containing one of these substrings
@@ -71,15 +82,6 @@ def _contains_forbidden_substring(name):
         return False
     lowered = name.casefold()
     return any(substring in lowered for substring in _FORBIDDEN_NAME_SUBSTRINGS)
-
-
-def _attr_root(node):
-    """Walk down an Attribute/Subscript chain to the leftmost Name id, or
-    None if the chain does not bottom out in a bare name (e.g. a call
-    result)."""
-    while isinstance(node, (ast.Attribute, ast.Subscript)):
-        node = node.value
-    return node.id if isinstance(node, ast.Name) else None
 
 
 def _is_simple_constant(node):
@@ -114,12 +116,13 @@ def is_pure_skill_source(src: str, func_name: str) -> tuple:
     - any Name/Call referencing a forbidden builtin: eval, exec, compile,
       __import__, open, input, getattr, setattr, globals, locals, vars,
       memoryview;
-    - any Attribute access whose root name is os, sys, subprocess, socket,
-      shutil, pathlib, importlib, builtins, OR whose `.attr` at ANY position
-      in the chain is one of FORBIDDEN_ATTR_NAMES (this closes the
-      allowlisted-module re-export bypass, e.g.
-      `datetime.sys.modules['os'].system(...)`), or any Name/Attribute whose
-      name is dunder-shaped (__x__);
+    - any Attribute access whose `.attr` (at ANY position in a chain, e.g.
+      both `.sys` and `.modules` in `datetime.sys.modules`) is dunder-shaped
+      (__x__) OR is not in ALLOWED_ATTR_NAMES -- a fail-closed allowlist of
+      exactly what a pure measurement skill needs, since a denylist cannot
+      keep up with introspection surfaces like `gi_frame`/`f_builtins`/
+      `f_globals`/`cr_frame` that are neither dunder nor "obviously"
+      dangerous;
     - any Name/Attribute referencing 'settings', 'db', 'client', 'secret',
       'token', 'api_key', or 'environ' (case-insensitive substring);
     - the module has any top-level statement other than imports, an
@@ -182,27 +185,16 @@ def is_pure_skill_source(src: str, func_name: str) -> tuple:
                 if _is_dunder(node.id) or _contains_forbidden_substring(node.id):
                     reasons.append(f"forbidden_name:{node.id}")
             elif isinstance(node, ast.Attribute):
-                # Every segment of the chain is checked here -- ast.walk
-                # visits each nested Attribute node independently, so
-                # `datetime.sys.modules` yields separate Attribute nodes for
-                # `.sys` and `.modules`, both checked against
-                # FORBIDDEN_ATTR_NAMES regardless of the (allowlisted) root.
-                if (_is_dunder(node.attr) or node.attr in FORBIDDEN_ATTR_NAMES
-                        or _contains_forbidden_substring(node.attr)):
+                # Fail-closed ALLOWLIST, not a denylist: every segment of
+                # every chain is checked here -- ast.walk visits each nested
+                # Attribute node independently, so e.g. `gen.gi_frame`
+                # yields its own Attribute node for `.gi_frame`, checked
+                # regardless of what `gen` is. Anything not explicitly
+                # allowlisted (a known-dangerous name, an introspection attr
+                # nobody thought to denylist, or simply unanticipated) is
+                # rejected.
+                if _is_dunder(node.attr) or node.attr not in ALLOWED_ATTR_NAMES:
                     reasons.append(f"forbidden_attribute:{node.attr}")
-                root = _attr_root(node)
-                if root in _FORBIDDEN_ATTR_ROOTS:
-                    reasons.append(f"forbidden_attribute_root:{root}")
-            elif isinstance(node, ast.Subscript):
-                # Defense in depth: a forbidden attribute/module reached via
-                # subscript (e.g. `x.modules['os']`) is already rejected by
-                # the Attribute check above on the same walk, but the base
-                # is re-checked explicitly here in case of future refactors.
-                base = node.value
-                if isinstance(base, ast.Attribute) and (_is_dunder(base.attr) or base.attr in FORBIDDEN_ATTR_NAMES):
-                    reasons.append(f"forbidden_subscript_base:{base.attr}")
-                elif isinstance(base, ast.Name) and (base.id in _FORBIDDEN_ATTR_ROOTS or base.id in FORBIDDEN_ATTR_NAMES):
-                    reasons.append(f"forbidden_subscript_base:{base.id}")
     except Exception as exc:  # defense in depth: never raise out of a scan
         return False, [f"scan_error:{type(exc).__name__}"]
 
