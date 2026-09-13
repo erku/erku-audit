@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +51,9 @@ from .sandbox_client import SandboxClient
 # which f916.templates.load_templates merges in behind the operator file.
 # Kept as a module-level attribute (rather than a hardcoded literal) so
 # tests can monkeypatch it to a temp file.
-_AUTO_TEMPLATES_PATH = Path(__file__).resolve().parent.parent / "config" / "auto_templates.json"
+# Writable DATA_DIR store (repo /app/config is read-only in the container);
+# must match f916.templates._AUTO_DEFAULT_PATH so load_templates reads what we write.
+_AUTO_TEMPLATES_PATH = Path(os.getenv("DATA_DIR", "data")) / "auto_templates.json"
 
 # Bound how much work a single call does, independent of the caller-supplied
 # gap list length.

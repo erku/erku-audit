@@ -11,6 +11,7 @@ load-from-disk in ``load_templates``.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -20,7 +21,11 @@ _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "bounty_temp
 # auto-added templates here, NEVER to the operator-curated _DEFAULT_PATH
 # above. It is agent state (like data/), not something a human curates or
 # commits -- see .gitignore.
-_AUTO_DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "auto_templates.json"
+# Agent-runtime store lives under the writable DATA_DIR volume (the repo's
+# /app/config is read-only in the container), so the self-extension engine can
+# actually append to it. Kept separate from the operator-curated
+# config/bounty_templates.json, which is never written.
+_AUTO_DEFAULT_PATH = Path(os.getenv("DATA_DIR", "data")) / "auto_templates.json"
 
 VERDICTS = ("BID", "CAUTION", "SKIP")
 

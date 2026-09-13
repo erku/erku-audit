@@ -38,30 +38,35 @@ _FORBIDDEN_BUILTINS = {
 # simply unanticipated -- is rejected. Over-blocking a rare legitimate attr
 # is an acceptable cost for a security-critical, fail-closed scanner.
 ALLOWED_ATTR_NAMES = {
-    # str methods (str.format/str.format_map and .encode are deliberately
-    # excluded: format()'s replacement-field mini-language does
-    # attribute/subscript traversal at runtime from inside a string literal,
-    # invisible to these AST checks; f-strings and %/+ cover formatting)
+    # str methods. str.format/str.format_map stay EXCLUDED: format()'s
+    # replacement-field mini-language does attribute/subscript traversal at
+    # runtime from inside a string literal, invisible to these AST checks;
+    # f-strings and %/+ cover formatting. .encode IS allowed -- it only makes
+    # bytes (and `sha256(s.encode()).hexdigest()` is the standard idiom).
     "strip", "lstrip", "rstrip", "casefold", "lower", "upper", "startswith", "endswith",
     "split", "rsplit", "splitlines", "join", "replace", "find", "rfind", "count",
-    "isdigit", "isalnum", "isalpha", "zfill", "ljust", "rjust", "title", "partition",
+    "isdigit", "isalnum", "isalpha", "isspace", "isnumeric", "zfill", "ljust", "rjust",
+    "title", "partition", "rpartition", "removeprefix", "removesuffix", "encode",
     # dict methods
-    "get", "items", "keys", "values", "setdefault",
+    "get", "items", "keys", "values", "setdefault", "pop",
     # list/set methods
     "append", "extend", "sort", "index", "add", "update", "union", "intersection", "difference",
-    # re
-    "findall", "search", "match", "fullmatch", "sub",
+    # re (module fns + Match methods -- all return strings/ints/None, no exec)
+    "findall", "search", "match", "fullmatch", "sub", "escape",
+    "group", "groups", "groupdict", "span", "start", "end",
     # statistics
-    "median", "mean", "pstdev", "stdev", "mode",
+    "median", "mean", "pstdev", "stdev", "variance", "pvariance", "fmean", "mode",
     # math
-    "isfinite", "isnan", "floor", "ceil", "sqrt", "log",
-    # json
-    "loads", "dumps",
+    "isfinite", "isnan", "isinf", "isclose", "inf", "nan", "pi", "e", "tau",
+    "floor", "ceil", "trunc", "sqrt", "log", "log2", "log10", "exp", "pow",
+    "fabs", "gcd", "hypot", "copysign", "comb", "perm", "prod",
+    # json (JSONDecodeError is a benign exception class)
+    "loads", "dumps", "JSONDecodeError",
     # hashlib
-    "sha256", "md5", "sha1", "hexdigest", "digest",
+    "sha256", "md5", "sha1", "sha512", "hexdigest", "digest",
     # datetime
     "datetime", "date", "timezone", "utcfromtimestamp", "fromtimestamp", "fromisoformat",
-    "strftime", "timestamp", "year", "month", "day", "hour", "minute", "second",
+    "strftime", "timestamp", "year", "month", "day", "hour", "minute", "second", "utc",
     # urllib.parse (including 'parse' itself, for `urllib.parse.<fn>` access)
     "urlsplit", "urlparse", "parse_qs", "parse_qsl", "unquote", "quote", "parse",
 }

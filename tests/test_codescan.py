@@ -538,3 +538,39 @@ def check_claim(target, params):
 '''
     ok, reasons = is_pure_skill_source(src, "check_claim")
     assert ok is True, reasons
+
+
+def test_common_safe_math_json_hash_attrs_are_allowed():
+    # Regression: the first live self-extension proposal was scan-rejected for
+    # forbidden_attribute:isclose / JSONDecodeError, which are benign. A pure
+    # skill using math.isclose, json.JSONDecodeError, sha256(s.encode()).hexdigest()
+    # and re Match.group must PASS the (now-widened) allowlist.
+    src = (
+        "import math\n"
+        "import json\n"
+        "import re\n"
+        "import hashlib\n\n\n"
+        "def check_claim(target, params):\n"
+        "    raw = str(target.get('value', ''))\n"
+        "    digest = hashlib.sha256(raw.encode()).hexdigest()\n"
+        "    m = re.search(r'(\d+)', raw)\n"
+        "    n = int(m.group(1)) if m else 0\n"
+        "    try:\n"
+        "        parsed = json.loads(raw) if raw.startswith('{') else {}\n"
+        "    except json.JSONDecodeError:\n"
+        "        parsed = {}\n"
+        "    ok = math.isclose(float(n), float(n))\n"
+        "    return {'status': 'consistent', 'digest': digest, 'n': n, 'ok': ok, 'parsed_keys': list(parsed.keys())}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is True, reasons
+
+
+def test_format_and_frame_intro_still_rejected_after_widening():
+    for bad in (
+        "def check_claim(target, params):\n    return {'x': '{0.__class__}'.format(target)}\n",
+        "def check_claim(target, params):\n    g = (x for x in [1])\n    return {'x': g.gi_frame.f_builtins}\n",
+        "import os\n\n\ndef check_claim(target, params):\n    return {'x': os.getcwd()}\n",
+    ):
+        ok, reasons = is_pure_skill_source(bad, "check_claim")
+        assert ok is False, bad
