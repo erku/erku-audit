@@ -277,7 +277,7 @@ class _CycleFakeClient:
         raise AssertionError("this cycle test must never POST")
 
 
-def test_cycle_runs_market_radar_every_cycle_reusing_listing_details(tmp_path):
+def test_cycle_runs_market_radar_on_interval_full_scan(tmp_path):
     from f916.loop import Worker
 
     db = Database(tmp_path / "state.db"); db.initialize()
@@ -290,27 +290,48 @@ def test_cycle_runs_market_radar_every_cycle_reusing_listing_details(tmp_path):
         def decide(self, *a, **k): return []
 
     worker = Worker(settings, db, client, Brain())
-    worker.cycle()
-    worker.cycle()
-
-    # Radar ran on the FIRST cycle already (not gated behind the daily
-    # maintenance block) and reused the cycle's own listing-detail fetch:
-    # exactly one /api/listings/1 fetch per cycle, never doubled by the
-    # market scan re-fetching it.
-    assert client.calls.count("/api/listings/1") == 2
-    assert client.calls.count("/api/listings") == 2
+    worker.cycle()   # market_scanned_at == 0 -> full radar scan runs this cycle
+    worker.cycle()   # within market_scan_interval (default 30 min) -> radar skipped
 
     market_events = db.events("market_intel")
-    assert len(market_events) == 1  # hourly dedup: second cycle (same run) does not re-log
+    assert len(market_events) == 1  # interval-throttled: runs once, not every cycle
     assert market_events[0]["data"].get("status") != "error"
     assert market_events[0]["data"]["earners"]["other"] == {"paid_count": 1, "total_atomic": 100}
 
     gap_events = db.events("capability_gap")
-    assert len(gap_events) == 1  # class_key dedup: seen once across both cycles
+    assert len(gap_events) == 1  # deduped per class_key
     assert gap_events[0]["data"]["class_key"] == market.class_key(
         {"funder": "Acme", "title": "Weekly Payment Cadence Report"})
 
     assert db.events("self_extend") == []  # self_extend_enabled=False -> selfext never attempted
+
+
+def test_full_scan_detects_gap_on_a_claimed_capacity_zero_listing(tmp_path):
+    # The whole point of the full scan: a gap usually sits on an ALREADY-CLAIMED
+    # listing (available_award_capacity == 0), which the cycle's capacity>0
+    # listing_details set excludes. scan_market (no listing_details) must still
+    # see it and flag the class.
+    db = Database(tmp_path / "state.db"); db.initialize()
+    settings = Settings(data_dir=tmp_path, handle="tester")
+
+    class FullScanClient:
+        def get(self, path, params=None):
+            if path == "/api/listings":
+                return {"listings": [{"id": 7, "expiry": 9_999_999_999}]}
+            if path == "/api/listings/7":
+                return {"listing_id": 7, "funder": "Zeta", "title": "Novel Proof Audit",
+                        "condition": "Deliver a formal spec reviewed by two citizens.",
+                        "submissions": [{"id": 9, "handle": "winner"}],
+                        "awards": [{"submission_id": 9, "state": "paid", "amount_atomic": 10000000}],
+                        "economics": {"available_award_capacity": 0}}  # claimed
+            if path == "/api/payouts":
+                return {"bindings": [{"handle": "winner", "receipt_id": "r9",
+                                      "amount_atomic": 10000000, "block_timestamp": 1}], "has_more": False}
+            return {}
+
+    intel = market.scan_market(FullScanClient(), db, settings)
+    gap_keys = [g["class_key"] for g in intel["gaps"]]
+    assert market.class_key({"funder": "Zeta", "title": "Novel Proof Audit"}) in gap_keys
 
 
 def test_cycle_guards_a_raising_selfext_act_on_gaps(tmp_path, monkeypatch):

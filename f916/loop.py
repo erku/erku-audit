@@ -141,25 +141,23 @@ class Worker:
                 except Exception as exc:
                     self.db.log("opportunity_error", {"listing_id":listing.get("listing_id"),
                                 "stage":"cycle", "error_type":type(exc).__name__})
-        # Market radar + tier-1 self-extension run EVERY cycle (not just in
-        # the daily maintenance block) so a newly-appearing bounty class is
-        # picked up within minutes, not up to 24h later -- bounties are
-        # claimed within the hour. Cheap: reuses this cycle's already-fetched
-        # listing_details (no extra /api/listings or detail fetches), only
-        # the bounded /api/payouts walk runs fresh. Tier-2 LLM proposals stay
-        # capped at settings.self_extend_max_proposals_per_day regardless of
-        # this being called every cycle. market_intel is logged at most
-        # hourly and capability_gap is deduplicated per class_key to avoid
-        # per-cycle log spam.
-        if self.settings.api_key:
+        # Market radar + tier-1 self-extension: a FULL scan of ALL open
+        # listings -- including already-claimed capacity-0 ones, where the paid
+        # winners (and thus the capability gaps) live -- on a bounded interval
+        # (market_scan_interval, default 30 min). NOT per-cycle: gap detection
+        # needs the whole listing set (reusing the cycle's capacity>0-only
+        # details blinded it to exactly the "someone already earned here"
+        # signal that defines a gap), and 30 min still catches a new class well
+        # inside the winner-takes-all window. The opportunity pipeline above
+        # already acts on open listings every cycle. Tier-2 LLM proposals stay
+        # capped per day; capability_gap is deduplicated per class_key.
+        if self.settings.api_key and (time.time() - self.db.get_setting("market_scanned_at", 0)
+                                      >= getattr(self.settings, "market_scan_interval", 1800)):
             try:
                 from f916 import market
-                intel = market.scan_market(self.client, self.db, self.settings, listing_details=listing_details)
-                # Log market_intel at most hourly (avoid per-cycle noise); dedup gaps per class_key.
-                last_intel = self.db.get_setting("market_intel_logged_at", 0)
-                if time.time() - last_intel >= 3600:
-                    self.db.log("market_intel", {"earners": dict(list(intel["earners"].items())[:15]), "gaps": intel["gaps"][:15]})
-                    self.db.set_setting("market_intel_logged_at", time.time())
+                intel = market.scan_market(self.client, self.db, self.settings)
+                self.db.set_setting("market_scanned_at", time.time())
+                self.db.log("market_intel", {"earners": dict(list(intel["earners"].items())[:15]), "gaps": intel["gaps"][:15]})
                 gap_seen = self.db.get_setting("capability_gap_seen", [])
                 if not isinstance(gap_seen, list): gap_seen = []
                 gs = set(gap_seen); new_gap = []
