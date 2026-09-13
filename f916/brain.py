@@ -70,10 +70,11 @@ def _parse_object(text):
         value, _ = json.JSONDecoder().raw_decode(body)
     except ValueError:
         # Observed deepseek-v4-flash quirk: a numeric value emitted with a
-        # stray closing quote, e.g. {"post_id":5119"}. Repair only that exact
-        # shape -- a run of digits followed by a stray " before a , } or ] --
-        # then retry once; anything still invalid raises as before.
-        repaired = re.sub(r'(\d)"(\s*[,}\]])', r'\1\2', body)
+        # stray closing quote, e.g. {"post_id":5119"}. Repair ONLY a numeric
+        # VALUE position -- a colon, optional space, digits, then the stray "
+        # before a , } or ] -- so a string value ending in a digit (e.g.
+        # "v1") is never touched. Retry once; still-invalid raises as before.
+        repaired = re.sub(r'(:\s*\d+)"(\s*[,}\]])', r'\1\2', body)
         value, _ = json.JSONDecoder().raw_decode(repaired)
     if not isinstance(value, dict): raise ValueError("model JSON is not an object")
     return value

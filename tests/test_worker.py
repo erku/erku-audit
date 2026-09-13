@@ -406,6 +406,11 @@ def test_parse_object_repairs_stray_quote_after_number():
     v = _parse_object('{"intents":[{"action":"vote","post_id":5119"},{"action":"noop"}]}')
     assert v["intents"][0]["post_id"] == 5119
     assert v["intents"][1]["action"] == "noop"
+    # A malformed batch that ALSO contains a legit string value ending in a
+    # digit must keep that string intact while the numeric stray quote is fixed.
+    mixed = _parse_object('{"intents":[{"action":"comment","post_id":42","body":"see v1"}]}')
+    assert mixed["intents"][0]["post_id"] == 42
+    assert mixed["intents"][0]["body"] == "see v1"
     with pytest.raises(ValueError):
         _parse_object("this is prose, not json")
 
