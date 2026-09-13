@@ -366,6 +366,61 @@ def test_rejects_object_subclasses_directly():
     assert any("forbidden_attribute:__subclasses__" in r for r in reasons)
 
 
+def test_rejects_str_format_replacement_field_traversal_bypass():
+    """str.format()'s replacement-field mini-language does attribute/
+    subscript traversal AT RUNTIME from inside a string literal -- invisible
+    to AST attribute checks. Banning the `.format` attribute outright closes
+    this class of bypass."""
+    src = (
+        "def check_claim(target, params):\n"
+        "    f = '{0.__globals__[__builtins__]}'.format(check_claim)\n"
+        "    return {'status': 'consistent', 'f': f}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:format" in r for r in reasons)
+
+
+def test_rejects_str_format_map_traversal_bypass():
+    src = (
+        "def check_claim(target, params):\n"
+        "    d = {'x': target}\n"
+        "    f = '{x.__class__}'.format_map(d)\n"
+        "    return {'status': 'consistent', 'f': f}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:format_map" in r for r in reasons)
+
+
+def test_f_string_summary_still_passes():
+    """f-strings are AST-visible (ast.FormattedValue), so ordinary
+    formatting like f"{n} batches" must keep working even though
+    str.format/format_map are now banned."""
+    src = (
+        "def check_claim(target, params):\n"
+        "    n = target.get('count', 0)\n"
+        "    summary = f'{n} batches'\n"
+        "    return {'status': 'consistent', 'summary': summary}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is True, reasons
+
+
+def test_f_string_embedding_forbidden_attribute_is_still_rejected():
+    """Proves f-string internals are still scanned: a forbidden attribute
+    referenced inside an f-string's replacement expression must be caught
+    via its ast.FormattedValue, exactly like anywhere else in the source."""
+    src = (
+        "def check_claim(target, params):\n"
+        "    summary = f'{target.__globals__}'\n"
+        "    return {'status': 'consistent', 'summary': summary}\n"
+    )
+    ok, reasons = is_pure_skill_source(src, "check_claim")
+    assert ok is False
+    assert any("forbidden_attribute:__globals__" in r for r in reasons)
+
+
 def test_genuinely_pure_skill_using_legit_stdlib_and_container_attrs_still_passes():
     """No false-positive over-block: datetime.datetime, re.findall,
     statistics.median, urllib.parse.urlsplit, math.isfinite, hashlib.sha256,

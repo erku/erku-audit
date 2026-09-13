@@ -44,6 +44,15 @@ FORBIDDEN_ATTR_NAMES = {
     "sys", "os", "subprocess", "socket", "shutil", "pathlib", "importlib", "builtins",
     "environ", "modules", "system", "popen", "spawn",
     "exec", "eval", "compile", "getattr", "setattr", "delattr", "globals", "locals", "vars", "open",
+    # str.format()/str.format_map()'s replacement-field mini-language does
+    # attribute/subscript traversal AT RUNTIME from inside a string literal
+    # (e.g. "{0.__globals__[__builtins__][eval]}".format(fn)), which is
+    # invisible to the AST attribute/dunder checks above since the traversal
+    # text lives in an ast.Constant, not an ast.Attribute. Pure skills don't
+    # need str.format/format_map -- f-strings (AST-visible via
+    # ast.FormattedValue, so a forbidden attr inside one is still caught)
+    # and %/+ concatenation cover all legitimate formatting.
+    "format", "format_map",
 }
 
 # Any identifier (Name or Attribute) containing one of these substrings
