@@ -1,6 +1,7 @@
 import hashlib
 from pathlib import Path
 import re
+import time
 import httpx
 from .models import Intent
 from invariants import check_intent
@@ -57,6 +58,18 @@ class Executor:
         if action=='submit' and not self._submission_valid(intent): return result('blocked','public_verified_artifact_required')
         if not approved and mode=='approve' and action!='vote':
             return result('queued','manual_review',queue_id=self.db.queue(data,'manual_review'))
+        if action=='comment':
+            # Pace comments across the day: the daily budget is real value
+            # (evidence-first audit notes), but front-loading it all in the
+            # first hours leaves the agent looking silent for ~20h. Cap comments
+            # to a bounded rate per rolling window so the same output spreads out.
+            window=getattr(self.settings,'comment_pace_window_seconds',3600)
+            limit=getattr(self.settings,'comment_pace_max_per_window',2)
+            recent=sum(1 for e in self.db.events('action',200)
+                       if e['data'].get('status')=='sent'
+                       and (e['data'].get('intent') or {}).get('action')=='comment'
+                       and time.time()-e['created_at']<window)
+            if recent>=limit: return result('blocked','comment_paced')
         if action=='vote':
             kind='comment' if intent.comment_id else 'post'; target=intent.comment_id or intent.post_id
             try:

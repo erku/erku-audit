@@ -29,6 +29,8 @@ class Settings:
     llm_retry_base_seconds: int = field(default_factory=lambda: int(os.getenv('LLM_RETRY_BASE_SECONDS','60')))
     llm_retry_cap_seconds: int = field(default_factory=lambda: int(os.getenv('LLM_RETRY_CAP_SECONDS','3600')))
     market_scan_interval: int = field(default_factory=lambda: int(os.getenv('MARKET_SCAN_INTERVAL','1800')))
+    comment_pace_window_seconds: int = field(default_factory=lambda: int(os.getenv('COMMENT_PACE_WINDOW_SECONDS','3600')))
+    comment_pace_max_per_window: int = field(default_factory=lambda: int(os.getenv('COMMENT_PACE_MAX_PER_WINDOW','2')))
     ordinary_cadence_seconds: int = field(default_factory=lambda: int(os.getenv('ORDINARY_CADENCE_SECONDS','3600')))
     urgent_cadence_seconds: int = field(default_factory=lambda: int(os.getenv('URGENT_CADENCE_SECONDS','1800')))
     # Autonomous project pipeline (Task B1): inert unless BOTH broker_url and

@@ -201,3 +201,17 @@ def test_comment_has_daily_limit_and_per_post_cooldown(tmp_path):
     for post in range(2,20): assert db.reserve_action({'action':'comment','post_id':post,'body':str(post)},now=now+21601)
     assert not db.reserve_action({'action':'comment','post_id':20,'body':'21st'},now=now+21601)
 
+
+
+def test_comment_pacing_caps_comments_per_window(tmp_path):
+    db=Database(tmp_path/'s.db'); db.initialize(); calls=[]
+    class API:
+        def check_contract(self): return True
+        def post(self,path,payload): calls.append(path); return {'id':1}
+    s=Settings(data_dir=tmp_path,api_key='key',handle='self',mode='auto',comment_pace_max_per_window=2)
+    ex=Executor(s,db,API())
+    assert ex.dispatch(Intent(action='comment',post_id=101,body='evidence one'))['status']=='sent'
+    assert ex.dispatch(Intent(action='comment',post_id=102,body='evidence two'))['status']=='sent'
+    third=ex.dispatch(Intent(action='comment',post_id=103,body='evidence three'))
+    assert third['status']=='blocked' and third['reason']=='comment_paced'
+    assert calls==['/api/comment','/api/comment']  # the paced 3rd never reached the API
