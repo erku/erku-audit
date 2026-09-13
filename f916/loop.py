@@ -121,7 +121,12 @@ class Worker:
             if not isinstance(listing,dict) or listing.get('withdrawn_at') or int(listing.get('expiry') or 0)<=now_seconds: continue
             detail=self._fetch(f"/api/listings/{int(listing['id'])}","submissions")
             economics=detail.get('economics',{}) if isinstance(detail,dict) else {}
-            if economics.get('available_award_capacity',1)>0: listing_details.append(detail)
+            capacity=economics.get('available_award_capacity',1)
+            # available_award_capacity can be null/absent/non-numeric on some
+            # listings; treat any non-number as "unknown -> include" (matching
+            # the historical default of 1) and never compare None to an int.
+            if not isinstance(capacity,(int,float)) or isinstance(capacity,bool) or capacity>0:
+                listing_details.append(detail)
         # Reused by daily_audit's rotation to build audit inputs without refetching.
         self._last_listing_details = listing_details
         if self.opportunity_runner:

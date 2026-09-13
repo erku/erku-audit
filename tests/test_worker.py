@@ -437,3 +437,25 @@ def test_quarantine_is_logged_once_across_changed_cycles(tmp_path):
     w.cycle(); w.cycle()
     phishing = [e for e in db.events("quarantine") if e["data"].get("id") == 3544]
     assert len(phishing) == 1
+
+
+def test_cycle_survives_listing_with_null_award_capacity(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "state.db"); db.initialize()
+    class API:
+        def get(self, path, params=None):
+            if path == "/api/listings": return {"listings": [{"id": 33, "expiry": 1999999999}]}
+            if path == "/api/listings/33":
+                return {"listing_id": 33, "title": "x", "condition": "y",
+                        "expiry": 1999999999, "economics": {"available_award_capacity": None}}
+            if path == "/api/official": return {"domains": ["1f916.ai"]}
+            return {}
+        def post(self, path, payload=None): return {}
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a, **k): return []
+    w = Worker(Settings(data_dir=tmp_path, api_key=""), db, API(), Brain())
+    # Must not raise TypeError on None > 0; a null-capacity listing is included.
+    result = w.cycle()
+    assert result is not None
+    assert w._last_listing_details and w._last_listing_details[0]["listing_id"] == 33
