@@ -94,6 +94,33 @@ def _project_summary(db):
     return {'by_stage': by_stage, 'repos': len(repos) if isinstance(repos, list) else 0}
 
 
+def _market_summary(db):
+    """Read-only rollup of the latest market_intel event plus the current
+    (deduplicated, most-recent-first) capability_gap events. Safe on an
+    empty DB. All values here are DATA from public reads; nothing here is
+    executed or treated as a command."""
+    latest = db.last_event('market_intel')
+    earners = {}
+    if isinstance(latest, dict) and isinstance(latest.get('data'), dict):
+        raw_earners = latest['data'].get('earners')
+        if isinstance(raw_earners, dict):
+            earners = raw_earners
+    top_earners = sorted(
+        ((handle, stats) for handle, stats in earners.items() if isinstance(stats, dict)),
+        key=lambda item: item[1].get('total_atomic', 0) or 0,
+        reverse=True,
+    )[:10]
+    gaps_by_key = {}
+    for event in db.events('capability_gap', 200):
+        data = event.get('data') if isinstance(event, dict) else None
+        if not isinstance(data, dict):
+            continue
+        key = data.get('class_key')
+        if key is not None and key not in gaps_by_key:
+            gaps_by_key[key] = data
+    return {'top_earners': top_earners, 'gaps': list(gaps_by_key.values())[:15]}
+
+
 def _build_results(db):
     """Read-only rollup for the 'results' page; safe to call on an empty DB."""
     reward_metrics = db.get_setting('reward_metrics', {})
@@ -104,6 +131,7 @@ def _build_results(db):
         'opportunities': _opportunity_summary(db),
         'audits': _audit_summary(db),
         'projects': _project_summary(db),
+        'market': _market_summary(db),
     }
 
 

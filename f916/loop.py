@@ -292,6 +292,22 @@ class Worker:
                 self.db.log("learning", learning.attribute_and_update(self.db, self.settings, me))
             except Exception as exc:
                 self.db.log("learning", {"status":"error","error_type":type(exc).__name__})
+            if self.settings.api_key:
+                try:
+                    from f916 import market
+                    intel = market.scan_market(self.client, self.db, self.settings)
+                    self.db.log("market_intel", {"earners": dict(list(intel["earners"].items())[:15]),
+                                                 "gaps": intel["gaps"][:15]})
+                    for gap in intel["gaps"][:15]:
+                        self.db.log("capability_gap", gap)
+                    if getattr(self.settings, "self_extend_enabled", False):
+                        try:
+                            from f916 import selfext
+                            selfext.act_on_gaps(intel["gaps"], self.settings, self.db, self.brain)
+                        except Exception as exc:
+                            self.db.log("self_extend", {"status": "error", "error_type": type(exc).__name__})
+                except Exception as exc:
+                    self.db.log("market_intel", {"status": "error", "error_type": type(exc).__name__})
             self.db.set_setting("last_maintenance", day)
         week = time.strftime("%G-W%V", time.gmtime())
         if self.db.get_setting("last_reward_week") != week:

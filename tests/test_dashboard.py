@@ -135,6 +135,39 @@ def test_results_page_counts_template_hits(panel):
     assert 'Trafienia szablonów: <strong>1</strong>' in response.text
 
 
+def test_results_page_shows_market_section_on_empty_db(panel):
+    client, db = panel
+    response = client.get('/results', auth=('admin', 'test-password'))
+    assert response.status_code == 200
+    assert 'Rynek' in response.text
+    assert 'Brak zaobserwowanych zarobków.' in response.text
+    assert 'Brak wykrytych luk.' in response.text
+
+
+def test_results_page_reflects_market_intel_and_capability_gap(panel):
+    client, db = panel
+    db.log('market_intel', {'earners': {'rival': {'paid_count': 3, 'total_atomic': 4200000}}, 'gaps': []})
+    db.log('capability_gap', {
+        'class_key': 'acme|cadence-report-weekly',
+        'funder': 'Acme',
+        'sample_listing_id': 1,
+        'sample_title': 'Weekly Cadence <script>alert(1)</script>',
+        'paid_handles': ['rival'],
+        'paid_total_atomic': 4200000,
+        'our_classification': 'unsupported',
+        'suggestion': 'template',
+    })
+    response = client.get('/results', auth=('admin', 'test-password'))
+    assert response.status_code == 200
+    assert 'rival' in response.text
+    assert '4200000' in response.text
+    assert 'acme|cadence-report-weekly' in response.text
+    assert 'template' in response.text
+    # Listing prose is DATA, never markup or a command: it must render escaped.
+    assert '<script>alert(1)</script>' not in response.text
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in response.text
+
+
 def test_token_limit_toggle_is_persisted(panel):
     client,db=panel; auth=('admin','test-password'); csrf=token(client)
     response=client.post('/settings/token-limits',auth=auth,data={'token_limits_form':'1','enabled':'true','csrf':csrf})
