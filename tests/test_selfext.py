@@ -115,13 +115,13 @@ def test_tier1_never_reads_or_writes_the_operator_bounty_templates_file(tmp_path
     """Hard safety line: config/bounty_templates.json is operator-curated and
     must never be mutated by the engine. Uses the REAL operator file path
     (only the separate auto store is redirected to a temp file) and checks
-    it is byte-for-byte unchanged, still holding exactly the 5 curated
+    it is byte-for-byte unchanged, still holding exactly the 6 curated
     templates, after the engine adds an auto template."""
     from f916.templates import _DEFAULT_PATH
 
     before = _DEFAULT_PATH.read_text(encoding="utf-8")
     before_entries = json.loads(before)
-    assert len(before_entries) == 5
+    assert len(before_entries) == 6
 
     auto_path = tmp_path / "auto_templates.json"
     monkeypatch.setattr(selfext, "_AUTO_TEMPLATES_PATH", auto_path)
@@ -133,7 +133,7 @@ def test_tier1_never_reads_or_writes_the_operator_bounty_templates_file(tmp_path
     assert summary == {"templates_added": 1, "proposals": 0}
     after = _DEFAULT_PATH.read_text(encoding="utf-8")
     assert after == before  # byte-for-byte untouched
-    assert len(json.loads(after)) == 5
+    assert len(json.loads(after)) == 6
     # The new template landed in the separate auto store instead.
     assert len(json.loads(auto_path.read_text(encoding="utf-8"))) == 1
 

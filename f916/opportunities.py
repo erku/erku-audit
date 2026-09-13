@@ -93,6 +93,63 @@ def walk_payout_receipts(client, max_pages=50, max_rows=5000):
     return receipts
 
 
+def _fetch_binding_receipt(client, binding_id):
+    """GET /api/payout-bindings/<binding_id> -- a single read-only,
+    allowlisted endpoint -- and derive the receipt-anatomy `quoted` fields
+    plus a deterministic verdict for the receipt-report skill.
+
+    The receipt fields may be served at the top level of the binding
+    response OR nested under `binding['receipt']`; both shapes are
+    checked. Verdict rules (deterministic, based only on the fetched
+    fields):
+      - PAID iff tx_hash is present AND transfer_log_index is not None
+        (a settled transfer exists);
+      - PAYABLE iff no tx_hash yet but the binding/receipt was fetched and
+        carries an amount_atomic;
+      - UNPROVEN otherwise (missing/none fields, non-dict response, or the
+        fetch itself failed).
+    Tolerates any client error or malformed response; never raises."""
+    try:
+        response = client.get(f"/api/payout-bindings/{int(binding_id)}")
+    except Exception:
+        return {}, "UNPROVEN", "Fetching the payout-binding failed; no receipt fields could be verified."
+    if not isinstance(response, dict):
+        return {}, "UNPROVEN", "The payout-binding response was not an object; no receipt fields could be verified."
+
+    nested = response.get("receipt")
+    receipt = nested if isinstance(nested, dict) else response
+
+    receipt_id = receipt.get("receipt_id")
+    tx_hash = receipt.get("tx_hash")
+    transfer_log_index = receipt.get("transfer_log_index")
+    amount_atomic = receipt.get("amount_atomic")
+
+    # Quote receipt_id, tx_hash, transfer_log_index, plus one more
+    # receipt/settlement field: settlement_block if present, else
+    # amount_atomic.
+    quoted = {"receipt_id": receipt_id, "tx_hash": tx_hash, "transfer_log_index": transfer_log_index}
+    if "settlement_block" in receipt:
+        quoted["settlement_block"] = receipt.get("settlement_block")
+    else:
+        quoted["amount_atomic"] = amount_atomic
+
+    has_tx = tx_hash is not None and tx_hash != ""
+    has_transfer_index = transfer_log_index is not None
+    amount_present = amount_atomic is not None
+
+    if has_tx and has_transfer_index:
+        verdict = "PAID"
+        basis = f"tx_hash={tx_hash!r} and transfer_log_index={transfer_log_index!r} show a settled transfer."
+    elif not has_tx and amount_present:
+        verdict = "PAYABLE"
+        basis = f"No tx_hash yet, but the binding carries amount_atomic={amount_atomic!r}."
+    else:
+        verdict = "UNPROVEN"
+        basis = "No settled transfer (tx_hash/transfer_log_index) and no payable amount could be confirmed."
+
+    return quoted, verdict, basis
+
+
 def _identity_int(value):
     """Extract a positive int identity from an int, a numeric string, or the
     API's ``"listing-<n>"`` resource-id form. Returns None on anything else."""
@@ -218,6 +275,16 @@ class OpportunityRunner:
             target = {**target}
             target["receipts"] = walk_payout_receipts(self.client)
             del target["walk"]
+        elif isinstance(target, dict) and target.get("walk") == "binding":
+            # Mirrors the 'payouts' walk above: templates.receipt_anatomy
+            # only carries a binding id (see its docstring for the strict,
+            # narrowly-scoped prose->integer extraction); the receipt-
+            # anatomy quoted fields and verdict are read live, here, from
+            # the single allowlisted GET /api/payout-bindings/<id>.
+            target = {**target}
+            del target["walk"]
+            quoted, verdict, basis = _fetch_binding_receipt(self.client, target["binding_id"])
+            target["quoted"], target["verdict"], target["verdict_basis"] = quoted, verdict, basis
         return run_skill(evaluation["skill"], target, evaluation["params"],
                          Path(self.settings.data_dir) / "artifacts", binding=binding)
 

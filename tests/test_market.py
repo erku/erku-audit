@@ -178,15 +178,43 @@ def test_own_paid_award_is_not_a_gap_signal(tmp_path):
     assert result["gaps"] == []
 
 
-def test_maintenance_logs_market_intel_and_guards_missing_selfext(tmp_path, monkeypatch):
+def test_scan_market_reuses_provided_listing_details_without_refetching(tmp_path):
+    """Part 1: when `listing_details` (already-fetched detail dicts, e.g.
+    from Worker.cycle) is supplied, scan_market must not call /api/listings
+    or fetch any individual listing detail -- only the bounded /api/payouts
+    walk runs fresh -- yet gaps are still computed correctly."""
+    db = Database(tmp_path / "state.db")
+    db.initialize()
+    settings = SimpleNamespace(handle="tester")
+    client = _FakeClient()
+
+    listing_details = [client.get("/api/listings/100"), client.get("/api/listings/200")]
+    client.calls.clear()  # only calls made *by scan_market itself* matter below
+
+    result = market.scan_market(client, db, settings, listing_details=listing_details)
+
+    listing_paths_called = [c for c in client.calls if c[0].startswith("/api/listings")]
+    assert listing_paths_called == []  # no /api/listings, no per-listing detail fetch
+    payouts_calls = [c for c in client.calls if c[0] == "/api/payouts"]
+    assert len(payouts_calls) == 1  # the payouts walk still runs fresh
+
+    gap_key = market.class_key({"funder": "Acme", "title": "Weekly Payment Cadence Snapshot"})
+    supported_key = market.class_key({"funder": "Acme", "title": "Inspect A Literal Command Gate"})
+    gaps_by_key = {g["class_key"]: g for g in result["gaps"]}
+    assert gap_key in gaps_by_key
+    assert supported_key not in gaps_by_key
+    assert result["earners"]["alice"] == {"paid_count": 1, "total_atomic": 1_000_000}
+
+
+def test_maintenance_no_longer_runs_the_market_block(tmp_path):
+    """Part 1: market radar + tier-1 self-extension moved to Worker.cycle
+    (see tests below) -- maintenance() must no longer touch them at all."""
     from f916.loop import Worker
 
     db = Database(tmp_path / "state.db")
     db.initialize()
     settings = Settings(data_dir=tmp_path, api_key="key123", handle="tester")
-    # Isolate market-only behavior from the (now-landed) self-extend feature,
-    # whose own default comes from the SELF_EXTEND_ENABLED env var.
-    settings.self_extend_enabled = False
+    settings.self_extend_enabled = True  # even enabled, maintenance must not invoke it
 
     class FakeClient:
         def get(self, path, params=None):
@@ -201,14 +229,6 @@ def test_maintenance_logs_market_intel_and_guards_missing_selfext(tmp_path, monk
                 return {"tags": []}
             if path == "/api/me":
                 return {"since_last_visit": {}}
-            if path == "/api/listings":
-                return {"listings": [{"listing_id": 1, "expiry": 9_999_999_999}]}
-            if path == "/api/listings/1":
-                return {
-                    "listing_id": 1, "funder": "Acme", "title": "Weekly Payment Cadence Report",
-                    "submissions": [{"id": 1, "handle": "other"}],
-                    "awards": [{"submission_id": 1, "state": "paid", "amount_atomic": 100}],
-                }
             return {}
 
         def post(self, path, payload):
@@ -220,49 +240,90 @@ def test_maintenance_logs_market_intel_and_guards_missing_selfext(tmp_path, monk
     worker = Worker(settings, db, FakeClient(), Brain())
     worker.maintenance()
 
+    assert db.events("market_intel") == []
+    assert db.events("capability_gap") == []
+    assert db.events("self_extend") == []
+    assert db.get_setting("last_maintenance") is not None
+
+
+class _CycleFakeClient:
+    """Minimal fake serving everything Worker.cycle needs, plus one
+    recurring-paid, currently-unsupported listing class (a capability gap)
+    and a settled /api/payouts row (an earner)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, path, params=None):
+        self.calls.append(path)
+        if path == "/api/listings":
+            return {"listings": [{"id": 1, "expiry": 9_999_999_999}]}
+        if path == "/api/listings/1":
+            return {
+                "listing_id": 1, "funder": "Acme", "title": "Weekly Payment Cadence Report",
+                "condition": "Public read of the settlement feed; no code changes needed.",
+                "submissions": [{"id": 1, "handle": "other"}],
+                "awards": [{"submission_id": 1, "state": "paid", "amount_atomic": 100}],
+                "economics": {"available_award_capacity": 1},
+            }
+        if path == "/api/payouts":
+            return {"bindings": [{"handle": "other", "receipt_id": "r1",
+                                   "amount_atomic": 100, "block_timestamp": 1}], "has_more": False}
+        if path == "/api/me":
+            return {"since_last_visit": {}}
+        return {}
+
+    def post(self, path, payload):
+        raise AssertionError("this cycle test must never POST")
+
+
+def test_cycle_runs_market_radar_every_cycle_reusing_listing_details(tmp_path):
+    from f916.loop import Worker
+
+    db = Database(tmp_path / "state.db"); db.initialize()
+    settings = Settings(data_dir=tmp_path, api_key="key123", handle="tester")
+    settings.self_extend_enabled = False
+    client = _CycleFakeClient()
+
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a, **k): return []
+
+    worker = Worker(settings, db, client, Brain())
+    worker.cycle()
+    worker.cycle()
+
+    # Radar ran on the FIRST cycle already (not gated behind the daily
+    # maintenance block) and reused the cycle's own listing-detail fetch:
+    # exactly one /api/listings/1 fetch per cycle, never doubled by the
+    # market scan re-fetching it.
+    assert client.calls.count("/api/listings/1") == 2
+    assert client.calls.count("/api/listings") == 2
+
     market_events = db.events("market_intel")
-    assert len(market_events) == 1
+    assert len(market_events) == 1  # hourly dedup: second cycle (same run) does not re-log
     assert market_events[0]["data"].get("status") != "error"
     assert market_events[0]["data"]["earners"]["other"] == {"paid_count": 1, "total_atomic": 100}
 
     gap_events = db.events("capability_gap")
-    assert len(gap_events) == 1
+    assert len(gap_events) == 1  # class_key dedup: seen once across both cycles
     assert gap_events[0]["data"]["class_key"] == market.class_key(
         {"funder": "Acme", "title": "Weekly Payment Cadence Report"})
 
     assert db.events("self_extend") == []  # self_extend_enabled=False -> selfext never attempted
-    assert db.get_setting("last_maintenance") is not None
 
 
-def test_maintenance_guards_a_raising_selfext_act_on_gaps(tmp_path, monkeypatch):
+def test_cycle_guards_a_raising_selfext_act_on_gaps(tmp_path, monkeypatch):
     from f916.loop import Worker
 
-    db = Database(tmp_path / "state.db")
-    db.initialize()
+    db = Database(tmp_path / "state.db"); db.initialize()
     settings = Settings(data_dir=tmp_path, api_key="key123", handle="tester")
-    settings.self_extend_enabled = True  # config field from the parallel task; set directly here
-
-    class FakeClient:
-        def get(self, path, params=None):
-            if path == "/api/rail":
-                return {"listings": []}
-            if path == "/api/payouts":
-                return {"bindings": [], "has_more": False}
-            if path == "/api/me/history":
-                return {"posts": []}
-            if path == "/api/tags":
-                return {"tags": []}
-            if path == "/api/me":
-                return {"since_last_visit": {}}
-            if path == "/api/listings":
-                return {"listings": []}
-            return {}
-
-        def post(self, path, payload):
-            raise AssertionError("maintenance must never POST")
+    settings.self_extend_enabled = True
+    client = _CycleFakeClient()
 
     class Brain:
-        pass
+        last_status = "ok"
+        def decide(self, *a, **k): return []
 
     import f916 as f916_package
 
@@ -279,11 +340,34 @@ def test_maintenance_guards_a_raising_selfext_act_on_gaps(tmp_path, monkeypatch)
     # not just sys.modules, for the fake raising implementation to be used.
     monkeypatch.setattr(f916_package, "selfext", fake_selfext, raising=False)
 
-    worker = Worker(settings, db, FakeClient(), Brain())
-    worker.maintenance()  # must complete despite a raising selfext.act_on_gaps
+    worker = Worker(settings, db, client, Brain())
+    worker.cycle()  # must complete despite a raising selfext.act_on_gaps
 
     assert db.events("market_intel")[0]["data"].get("status") != "error"
     self_extend_events = db.events("self_extend")
     assert len(self_extend_events) == 1
     assert self_extend_events[0]["data"] == {"status": "error", "error_type": "RuntimeError"}
-    assert db.get_setting("last_maintenance") is not None
+
+
+def test_cycle_guards_a_raising_market_scan(tmp_path, monkeypatch):
+    from f916.loop import Worker
+
+    db = Database(tmp_path / "state.db"); db.initialize()
+    settings = Settings(data_dir=tmp_path, api_key="key123", handle="tester")
+    client = _CycleFakeClient()
+
+    def boom(client, db, settings, *, listing_details=None, max_listings=25):
+        raise RuntimeError("market boom")
+    monkeypatch.setattr(market, "scan_market", boom)
+
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a, **k): return []
+
+    worker = Worker(settings, db, client, Brain())
+    result = worker.cycle()  # must not raise
+
+    assert result["changed"]
+    events = db.events("market_intel")
+    assert len(events) == 1
+    assert events[0]["data"] == {"status": "error", "error_type": "RuntimeError"}

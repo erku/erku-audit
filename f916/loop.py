@@ -141,6 +141,42 @@ class Worker:
                 except Exception as exc:
                     self.db.log("opportunity_error", {"listing_id":listing.get("listing_id"),
                                 "stage":"cycle", "error_type":type(exc).__name__})
+        # Market radar + tier-1 self-extension run EVERY cycle (not just in
+        # the daily maintenance block) so a newly-appearing bounty class is
+        # picked up within minutes, not up to 24h later -- bounties are
+        # claimed within the hour. Cheap: reuses this cycle's already-fetched
+        # listing_details (no extra /api/listings or detail fetches), only
+        # the bounded /api/payouts walk runs fresh. Tier-2 LLM proposals stay
+        # capped at settings.self_extend_max_proposals_per_day regardless of
+        # this being called every cycle. market_intel is logged at most
+        # hourly and capability_gap is deduplicated per class_key to avoid
+        # per-cycle log spam.
+        if self.settings.api_key:
+            try:
+                from f916 import market
+                intel = market.scan_market(self.client, self.db, self.settings, listing_details=listing_details)
+                # Log market_intel at most hourly (avoid per-cycle noise); dedup gaps per class_key.
+                last_intel = self.db.get_setting("market_intel_logged_at", 0)
+                if time.time() - last_intel >= 3600:
+                    self.db.log("market_intel", {"earners": dict(list(intel["earners"].items())[:15]), "gaps": intel["gaps"][:15]})
+                    self.db.set_setting("market_intel_logged_at", time.time())
+                gap_seen = self.db.get_setting("capability_gap_seen", [])
+                if not isinstance(gap_seen, list): gap_seen = []
+                gs = set(gap_seen); new_gap = []
+                for gap in intel["gaps"][:15]:
+                    ck = gap.get("class_key")
+                    if ck in gs: continue
+                    self.db.log("capability_gap", gap); gs.add(ck); new_gap.append(ck)
+                if new_gap:
+                    self.db.set_setting("capability_gap_seen", (gap_seen + new_gap)[-300:])
+                if getattr(self.settings, "self_extend_enabled", False):
+                    try:
+                        from f916 import selfext
+                        selfext.act_on_gaps(intel["gaps"], self.settings, self.db, self.brain)
+                    except Exception as exc:
+                        self.db.log("self_extend", {"status": "error", "error_type": type(exc).__name__})
+            except Exception as exc:
+                self.db.log("market_intel", {"status": "error", "error_type": type(exc).__name__})
         if self.settings.api_key:
             try:
                 from f916.verifier import Verifier
@@ -302,22 +338,9 @@ class Worker:
                 self.db.log("learning", learning.attribute_and_update(self.db, self.settings, me))
             except Exception as exc:
                 self.db.log("learning", {"status":"error","error_type":type(exc).__name__})
-            if self.settings.api_key:
-                try:
-                    from f916 import market
-                    intel = market.scan_market(self.client, self.db, self.settings)
-                    self.db.log("market_intel", {"earners": dict(list(intel["earners"].items())[:15]),
-                                                 "gaps": intel["gaps"][:15]})
-                    for gap in intel["gaps"][:15]:
-                        self.db.log("capability_gap", gap)
-                    if getattr(self.settings, "self_extend_enabled", False):
-                        try:
-                            from f916 import selfext
-                            selfext.act_on_gaps(intel["gaps"], self.settings, self.db, self.brain)
-                        except Exception as exc:
-                            self.db.log("self_extend", {"status": "error", "error_type": type(exc).__name__})
-                except Exception as exc:
-                    self.db.log("market_intel", {"status": "error", "error_type": type(exc).__name__})
+            # Market radar + tier-1 self-extension now run every cycle (see
+            # Worker.cycle) so a new bounty class is picked up within
+            # minutes rather than waiting for this once-a-day block.
             self.db.set_setting("last_maintenance", day)
         week = time.strftime("%G-W%V", time.gmtime())
         if self.db.get_setting("last_reward_week") != week:

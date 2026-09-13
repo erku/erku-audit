@@ -26,7 +26,8 @@ _STOPWORDS = frozenset({
     "be", "it", "its",
 })
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_TEMPLATE_HINTS = ("rail", "economic", "payouts", "quote", "census", "stranger", "cadence")
+_TEMPLATE_HINTS = ("rail", "economic", "payouts", "quote", "census", "stranger", "cadence",
+                   "receipt", "anatomy", "binding")
 
 
 def class_key(listing: dict) -> str:
@@ -128,18 +129,15 @@ def _open_listing_ids(client, max_listings):
     return identities
 
 
-def _scan_listing_classes(client, max_listings):
-    """Fetch up to `max_listings` open-listing details and accumulate
-    per-class_key paid-award stats. Returns (class_stats, sample_by_key)
-    where sample_by_key holds one full listing detail per class_key for
-    later gap evaluation."""
+def _accumulate_class_stats(details):
+    """Accumulate per-class_key paid-award stats from an iterable of
+    already-fetched listing DETAIL dicts (no network). Returns
+    (class_stats, sample_by_key) where sample_by_key holds one full listing
+    detail per class_key for later gap evaluation. Malformed entries are
+    skipped; never raises for a well-formed iterable."""
     class_stats = {}
     sample_by_key = {}
-    for listing_num in _open_listing_ids(client, max_listings):
-        try:
-            detail = client.get(f"/api/listings/{listing_num}")
-        except Exception:
-            continue
+    for detail in details:
         if not isinstance(detail, dict):
             continue
         key = class_key(detail)
@@ -174,6 +172,21 @@ def _scan_listing_classes(client, max_listings):
     for entry in class_stats.values():
         entry["paid_handles"] = sorted(entry["paid_handles"])
     return class_stats, sample_by_key
+
+
+def _scan_listing_classes(client, max_listings):
+    """Fetch up to `max_listings` open-listing details and accumulate
+    per-class_key paid-award stats via `_accumulate_class_stats`. Returns
+    (class_stats, sample_by_key)."""
+    details = []
+    for listing_num in _open_listing_ids(client, max_listings):
+        try:
+            detail = client.get(f"/api/listings/{listing_num}")
+        except Exception:
+            continue
+        if isinstance(detail, dict):
+            details.append(detail)
+    return _accumulate_class_stats(details)
 
 
 def _suggest(funder, title):
@@ -219,11 +232,21 @@ def _detect_gaps(class_stats, sample_by_key, own_handle):
     return gaps
 
 
-def scan_market(client, db, settings, *, max_listings=25) -> dict:
+def scan_market(client, db, settings, *, listing_details=None, max_listings=25) -> dict:
     """Build market intelligence from public data only. Bounded, defensive,
     never raises. See module docstring. Returns
     {'earners': {...}, 'class_stats': {...}, 'gaps': [...]}. Logs nothing
-    itself -- the caller (Worker.maintenance) logs the result."""
+    itself -- the caller logs the result.
+
+    `listing_details`, when provided (a list of already-fetched listing
+    DETAIL dicts, e.g. Worker.cycle's per-cycle open-listing fetch), is
+    REUSED for the class_stats/gap scan instead of re-fetching
+    /api/listings + each listing's detail -- this is what lets the radar
+    run every cycle cheaply. Only the `/api/payouts` walk (bounded) still
+    runs fresh every call, since it is not part of the per-cycle listing
+    fetch. When `listing_details` is None (the default), the original
+    self-fetching path runs unchanged, for the daily-maintenance/standalone
+    caller."""
     earners, class_stats, gaps = {}, {}, []
     try:
         own_handle = str(getattr(settings, "handle", "") or "").casefold()
@@ -232,7 +255,10 @@ def scan_market(client, db, settings, *, max_listings=25) -> dict:
         except Exception:
             earners = {}
         try:
-            class_stats, sample_by_key = _scan_listing_classes(client, max_listings)
+            if listing_details is not None:
+                class_stats, sample_by_key = _accumulate_class_stats(listing_details)
+            else:
+                class_stats, sample_by_key = _scan_listing_classes(client, max_listings)
         except Exception:
             class_stats, sample_by_key = {}, {}
         try:

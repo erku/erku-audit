@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, parse_qsl
 from invariants import redact
 from defense.regress import run_regression
 
-SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam','rail-report','rail-derivation-check','batch-cadence'})
+SKILLS = frozenset({'gate-probe','leak-probe','rail-audit','chain-verify','self-redteam','rail-report','rail-derivation-check','batch-cadence','receipt-report'})
 
 
 def _gate(target, params):
@@ -136,6 +136,22 @@ def _rail_report(target, params):
     return {'status':'consistent','findings':[],'summary':summary,'quoted':quoted,'verdict':verdict,'source':target.get('source')}
 
 
+def _receipt_report(target, params):
+    """Stranger-checkable receipt anatomy for a payout-binding.
+
+    Unlike `_rail_report` (which quotes the LISTING's own economics),
+    `target` here quotes fields from the referenced payout-binding/receipt
+    itself (see opportunities.build_artifact's walk:'binding' handling,
+    which populates `quoted`/`verdict`/`verdict_basis` from a live GET
+    /api/payout-bindings/<id>). Pure formatting; executes nothing."""
+    verdict = target.get('verdict')
+    quoted = target.get('quoted')
+    if verdict not in {'PAID', 'PAYABLE', 'UNPROVEN'} or not isinstance(quoted, dict):
+        return {'status':'inconclusive','findings':[],'summary':'receipt-report requires quoted payout-binding fields and a verdict.'}
+    summary = f"Stranger-checkable receipt anatomy for payout-binding {target.get('binding_id')}: {verdict}. {target.get('verdict_basis','')}"
+    return {'status':'consistent','findings':[],'summary':summary,'quoted':quoted,'verdict':verdict,'source':target.get('source')}
+
+
 def _batch_cadence(target, params):
     """Deterministic, stranger-checkable settlement-receipt batch cadence.
 
@@ -227,6 +243,7 @@ def run(skill, target, params, output_dir, binding=None):
     elif skill == 'leak-probe': result = _leak(target,params)
     elif skill == 'rail-audit': result = _rail(target,params)
     elif skill == 'rail-report': result = _rail_report(target,params)
+    elif skill == 'receipt-report': result = _receipt_report(target,params)
     elif skill == 'rail-derivation-check': result = _rail_derivation(target,params)
     elif skill == 'batch-cadence': result = _batch_cadence(target,params)
     elif skill == 'self-redteam':

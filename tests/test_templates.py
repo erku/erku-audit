@@ -32,7 +32,7 @@ def test_load_templates_reads_the_real_seed_file():
     assert {"rail-state-self-report", "award-slot-census",
             "rail-false-number", "break-the-rail", "batch-cadence"} <= ids
     for t in templates:
-        assert t["skill"] in {"rail-report", "rail-derivation-check", "batch-cadence"}
+        assert t["skill"] in {"rail-report", "rail-derivation-check", "batch-cadence", "receipt-report"}
         assert t["builder"] in BUILDERS
 
 
@@ -94,13 +94,14 @@ def test_load_templates_operator_entry_wins_a_match_over_an_auto_entry():
     assert matched["id"] == "operator"
 
 
-def test_real_operator_seed_file_has_exactly_five_curated_templates_and_is_never_selfext_written():
+def test_real_operator_seed_file_has_exactly_six_curated_templates_and_is_never_selfext_written():
     from f916.templates import _DEFAULT_PATH
     on_disk = json.loads(_DEFAULT_PATH.read_text(encoding="utf-8"))
     assert isinstance(on_disk, list)
-    assert len(on_disk) == 5
+    assert len(on_disk) == 6
     assert {t["id"] for t in on_disk} == {"rail-state-self-report", "award-slot-census",
-                                           "rail-false-number", "break-the-rail", "batch-cadence"}
+                                           "rail-false-number", "break-the-rail", "batch-cadence",
+                                           "receipt-anatomy"}
 
 
 # --- match_template ---------------------------------------------------------

@@ -11,6 +11,7 @@ load-from-disk in ``load_templates``.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "bounty_templates.json"
@@ -220,5 +221,40 @@ def batch_cadence(listing: dict) -> dict:
     }
 
 
+# The ONE place in this codebase where a numeric parameter is extracted
+# from community-authored prose. It is deliberately narrow: a STRICT
+# integer immediately following the literal phrase "payout-binding(s)" or
+# "binding" (case-insensitive; the "payout-binding" alternative is tried
+# first so it wins over the bare "binding" alternative when both match the
+# same text). That integer is used for exactly one purpose downstream --
+# as the <id> path segment of a single read-only, allowlisted GET
+# (`/api/payout-bindings/<id>`, see opportunities.build_artifact's
+# walk:'binding' handling) -- never as a command, never written back
+# anywhere, never influencing anything beyond which binding is read. No
+# other text from the listing is interpreted.
+_BINDING_ID_RE = re.compile(r"(?:payout-binding[s]?|binding)\s+(\d+)", re.I)
+
+
+def receipt_anatomy(listing: dict) -> dict:
+    """Build the receipt-report skill TARGET by extracting a payout-binding
+    id from the listing's OWN title/condition text (see _BINDING_ID_RE
+    above for the strict, narrowly-scoped extraction rule and its
+    justification). No other network access or prose parsing happens here.
+
+    Raises ValueError('no_binding_id') when no such integer is found."""
+    if not isinstance(listing, dict):
+        raise ValueError("no_binding_id")
+    text = f'{listing.get("title", "")}\n{listing.get("condition", "")}'
+    match = _BINDING_ID_RE.search(text)
+    if match is None:
+        raise ValueError("no_binding_id")
+    binding_id = int(match.group(1))
+    return {
+        "binding_id": binding_id,
+        "source": f"GET https://1f916.ai/api/payout-bindings/{binding_id}",
+        "walk": "binding",
+    }
+
+
 BUILDERS = {"rail_self_report": rail_self_report, "rail_derivation_check": rail_derivation_check,
-            "batch_cadence": batch_cadence}
+            "batch_cadence": batch_cadence, "receipt_anatomy": receipt_anatomy}
