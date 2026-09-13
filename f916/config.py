@@ -59,6 +59,23 @@ class Settings:
     self_extend_automerge: bool = field(default_factory=lambda: _bool_env('SELF_EXTEND_AUTOMERGE','false'))
     self_extend_max_templates: int = field(default_factory=lambda: int(os.getenv('SELF_EXTEND_MAX_TEMPLATES','8')))
     self_extend_max_proposals_per_day: int = field(default_factory=lambda: int(os.getenv('SELF_EXTEND_MAX_PROPOSALS_PER_DAY','1')))
+    # Retry (Task X follow-up): a gap that fails for a FIXABLE reason (e.g.
+    # an over-strict scanner, later widened) is retried -- bounded by a
+    # retry count and gated by a cooldown -- instead of being permanently
+    # skipped like a genuine success. See f916/selfext.py _attempts/_bump_attempt.
+    self_extend_retry_max: int = field(default_factory=lambda: int(os.getenv('SELF_EXTEND_RETRY_MAX','3')))
+    self_extend_retry_cooldown_seconds: int = field(default_factory=lambda: int(os.getenv('SELF_EXTEND_RETRY_COOLDOWN_SECONDS','86400')))
+    # Worthwhileness / ROI gate (Task X follow-up) -- see f916/worthwhile.py.
+    # A tier-2 gap whose measured reward can't recoup the expensive LLM
+    # generation call is skipped UNLESS it carries prestige (reputation /
+    # future value), which is worth pursuing regardless of reward.
+    worthwhile_min_reward_usd: float = field(default_factory=lambda: float(os.getenv('WORTHWHILE_MIN_REWARD_USD','0.5')))
+    worthwhile_prestige_terms: tuple = field(default_factory=lambda: tuple(
+        t.strip() for t in os.getenv('WORTHWHILE_PRESTIGE_TERMS', 'grant,peer review,peer-review,official,charter').split(',') if t.strip()
+    ))
+    worthwhile_prestige_funders: tuple = field(default_factory=lambda: tuple(
+        t.strip() for t in os.getenv('WORTHWHILE_PRESTIGE_FUNDERS', '').split(',') if t.strip()
+    ))
     def __post_init__(self):
         self.data_dir=Path(self.data_dir)
         if self.mode not in {'off','approve','auto'}: raise ValueError('Invalid mode')

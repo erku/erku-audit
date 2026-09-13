@@ -77,8 +77,14 @@ def template_gap(class_key="acme|rail derivation", funder="acme",
     return {"class_key": class_key, "funder": funder, "sample_title": sample_title, "suggestion": "template"}
 
 
-def skill_gap(class_key="acme|novel class", funder="acme", sample_title="A brand new bounty class"):
-    return {"class_key": class_key, "funder": funder, "sample_title": sample_title, "suggestion": "skill"}
+def skill_gap(class_key="acme|novel class", funder="acme", sample_title="A brand new bounty class",
+              paid_total_atomic=1_000_000):
+    # paid_total_atomic defaults to $1.00 -- comfortably above the default
+    # worthwhile_min_reward_usd (0.5) so pre-existing generation/scan/sandbox
+    # tests below aren't incidentally gated by the ROI check (see
+    # test_worthwhile.py and the ROI-specific tests further down for that).
+    return {"class_key": class_key, "funder": funder, "sample_title": sample_title, "suggestion": "skill",
+            "paid_total_atomic": paid_total_atomic}
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +368,168 @@ def test_tier2_is_idempotent_per_class_key(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Retry -- a FIXABLE tier-2 failure is NOT permanently skipped like a
+# genuine success: it is recorded in selfext_attempts with a bounded retry
+# count and a cooldown, so a later engine improvement can retry it.
+# ---------------------------------------------------------------------------
+def test_tier2_scan_rejected_is_not_seen_but_recorded_as_an_attempt(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": IMPURE_SOURCE, "tests": TESTS_SOURCE})
+    gap = skill_gap()
+
+    summary = selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=make_sandbox_client_cls())
+
+    assert summary == {"templates_added": 0, "proposals": 0}
+    assert gap["class_key"] not in _seen(db)
+    attempts = db.get_setting("selfext_attempts", {})
+    assert attempts[gap["class_key"]]["count"] == 1
+
+
+def test_tier2_retry_within_cooldown_is_skipped_without_a_new_attempt(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5)  # default cooldown: 1 day
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": IMPURE_SOURCE, "tests": TESTS_SOURCE})
+    sandbox_cls = make_sandbox_client_cls()
+    gap = skill_gap()
+
+    selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)
+    selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)
+
+    assert len(brain.calls) == 1  # the second call was skipped silently (still cooling down)
+    attempts = db.get_setting("selfext_attempts", {})
+    assert attempts[gap["class_key"]]["count"] == 1
+    assert gap["class_key"] not in _seen(db)
+
+
+def test_tier2_retries_once_the_cooldown_has_elapsed(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5,
+                              self_extend_retry_cooldown_seconds=100)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": IMPURE_SOURCE, "tests": TESTS_SOURCE})
+    sandbox_cls = make_sandbox_client_cls()
+    gap = skill_gap()
+
+    selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)
+    attempts = db.get_setting("selfext_attempts", {})
+    attempts[gap["class_key"]]["last_ts"] -= 1000  # well past the 100s cooldown
+    db.set_setting("selfext_attempts", attempts)
+
+    selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)
+
+    assert len(brain.calls) == 2
+    attempts = db.get_setting("selfext_attempts", {})
+    assert attempts[gap["class_key"]]["count"] == 2
+
+
+def test_tier2_stops_retrying_once_retry_max_is_reached(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5,
+                              self_extend_retry_max=2, self_extend_retry_cooldown_seconds=0)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": IMPURE_SOURCE, "tests": TESTS_SOURCE})
+    sandbox_cls = make_sandbox_client_cls()
+    gap = skill_gap()
+
+    selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)  # attempt 1
+    selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)  # attempt 2 == retry_max
+    summary3 = selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=sandbox_cls)  # exhausted
+
+    assert len(brain.calls) == 2  # the third call never reaches generate_skill
+    assert summary3 == {"templates_added": 0, "proposals": 0}
+    statuses = [e["data"].get("status") for e in db.events("self_extend")]
+    assert statuses.count("retry_exhausted") == 1
+    assert gap["class_key"] not in _seen(db)
+
+
+def test_tier2_success_marks_seen_and_leaves_no_retry_record(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": PURE_SOURCE, "tests": TESTS_SOURCE})
+    gap = skill_gap()
+
+    selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=make_sandbox_client_cls(passed=True))
+
+    assert gap["class_key"] in _seen(db)
+    assert gap["class_key"] not in db.get_setting("selfext_attempts", {})
+
+
+# ---------------------------------------------------------------------------
+# ROI gate (f916/worthwhile.py) -- a low-reward, non-prestige tier-2 gap is
+# skipped BEFORE the expensive brain.generate_skill call. The skip is not a
+# failure: not seen, not an attempt, and the daily cap is untouched.
+# ---------------------------------------------------------------------------
+def test_tier2_low_roi_gap_skips_generation_without_any_penalty(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5, worthwhile_min_reward_usd=5.0)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": PURE_SOURCE, "tests": TESTS_SOURCE})
+    gap = skill_gap(paid_total_atomic=100_000)  # $0.10 -- below the $5 min, no prestige
+
+    summary = selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=make_sandbox_client_cls())
+
+    assert summary == {"templates_added": 0, "proposals": 0}
+    assert brain.calls == []  # the expensive call is never made
+    assert gap["class_key"] not in _seen(db)
+    assert gap["class_key"] not in db.get_setting("selfext_attempts", {})
+    data = db.events("self_extend")[0]["data"]
+    assert data == {"tier": "skill", "class_key": gap["class_key"], "status": "skipped_low_roi",
+                     "reward_usd": 0.1, "prestige": False}
+    assert selfext._today_proposal_count(db) == 0  # the daily cap was never consumed
+
+
+def test_tier2_low_roi_gap_proceeds_automatically_once_worthwhile(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5, worthwhile_min_reward_usd=5.0)
+    db = make_db(tmp_path)
+    gap = skill_gap(paid_total_atomic=100_000)
+
+    selfext.act_on_gaps([gap], settings, db, FakeBrain({}), sandbox_client_cls=make_sandbox_client_cls())
+    gap["paid_total_atomic"] = 10_000_000  # now well above the $5 min
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": PURE_SOURCE, "tests": TESTS_SOURCE})
+
+    summary = selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=make_sandbox_client_cls(passed=True))
+
+    assert len(brain.calls) == 1
+    assert summary["proposals"] == 1
+    assert gap["class_key"] in _seen(db)
+
+
+def test_tier2_prestige_funder_proceeds_despite_low_reward(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5, worthwhile_min_reward_usd=5.0,
+                              worthwhile_prestige_funders=("acme",))
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": PURE_SOURCE, "tests": TESTS_SOURCE})
+    gap = skill_gap(paid_total_atomic=0, funder="acme")
+
+    summary = selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=make_sandbox_client_cls(passed=True))
+
+    assert len(brain.calls) == 1
+    assert summary["proposals"] == 1
+
+
+def test_tier2_prestige_term_in_title_proceeds_despite_low_reward(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5, worthwhile_min_reward_usd=5.0)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": PURE_SOURCE, "tests": TESTS_SOURCE})
+    gap = skill_gap(paid_total_atomic=0, sample_title="Official grant renewal audit")
+
+    summary = selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=make_sandbox_client_cls(passed=True))
+
+    assert len(brain.calls) == 1
+    assert summary["proposals"] == 1
+
+
+def test_tier2_high_reward_gap_proceeds_without_prestige(tmp_path):
+    settings = make_settings(tmp_path, self_extend_max_proposals_per_day=5, worthwhile_min_reward_usd=0.5)
+    db = make_db(tmp_path)
+    brain = FakeBrain({"func_name": "check_rail_thing", "source": PURE_SOURCE, "tests": TESTS_SOURCE})
+    gap = skill_gap(paid_total_atomic=10_000_000)  # $10, comfortably above the $0.5 min
+
+    summary = selfext.act_on_gaps([gap], settings, db, brain, sandbox_client_cls=make_sandbox_client_cls(passed=True))
+
+    assert len(brain.calls) == 1
+    assert summary["proposals"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Cross-cutting safety
 # ---------------------------------------------------------------------------
 def test_act_on_gaps_never_raises_on_malformed_gaps(tmp_path, monkeypatch):
@@ -413,3 +581,8 @@ def test_generated_func_name_is_never_defined_in_this_process(tmp_path):
 def _all_setting_keys(db):
     with db.connect() as c:
         return [row[0] for row in c.execute("SELECT key FROM settings").fetchall()]
+
+
+def _seen(db):
+    seen = db.get_setting("selfext_seen", [])
+    return set(seen) if isinstance(seen, list) else set()

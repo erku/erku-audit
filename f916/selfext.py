@@ -30,8 +30,23 @@ HARD SAFETY LINES (see docs/implementation-plan-v7.md Task X):
     prose; see `f916/brain.py`.
 
 Processing is idempotent per `class_key`, deduplicated via the db setting
-`selfext_seen`, so a gap already acted on (successfully or not) is never
-reprocessed.
+`selfext_seen` -- but `selfext_seen` is only ever set on a genuine SUCCESS
+(a tier-1 template added, or a tier-2 proposal record written). A gap that
+fails for a FIXABLE reason (`generation_empty`, `scan_rejected`, `capped`,
+`no_existing_skill`, `write_failed`, or an unexpected `error`) is instead
+recorded in the db setting `selfext_attempts` with a bounded retry count and
+a cooldown (`settings.self_extend_retry_max` /
+`settings.self_extend_retry_cooldown_seconds`), so an engine improvement
+(e.g. a widened scanner) can let a previously-failed gap be retried instead
+of being silently lost forever.
+
+Before the expensive tier-2 `brain.generate_skill` call, a cheap
+deterministic ROI gate (`f916/worthwhile.py`) skips gaps whose measured
+reward can't recoup the token cost, UNLESS the gap carries PRESTIGE
+(reputation / future value) worth pursuing on its own. A low-ROI skip is
+NOT a failure: it is not marked seen, not counted as an attempt, and does
+not consume the daily proposal cap, so it is cheaply re-checked on every
+scan and proceeds automatically once it becomes worthwhile.
 """
 from __future__ import annotations
 
@@ -43,6 +58,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import codescan
+from . import worthwhile
 from .sandbox_client import SandboxClient
 
 # The operator-curated allowlist -- this engine reads it only to know it
@@ -124,15 +140,50 @@ def _mark_seen(db, seen_set, class_key):
     db.set_setting("selfext_seen", sorted(seen_set))
 
 
+# Bound how many distinct failing class_keys we track retry state for, so a
+# flood of one-off failures can't grow the setting unboundedly.
+MAX_TRACKED_ATTEMPTS = 300
+
+
+def _attempts(db):
+    """Read the db setting 'selfext_attempts' -> {class_key: {'count':int,
+    'last_ts':float}}. {} on missing/malformed data."""
+    attempts = db.get_setting("selfext_attempts", {})
+    return attempts if isinstance(attempts, dict) else {}
+
+
+def _bump_attempt(db, attempts, class_key, now):
+    """Record one more FIXABLE-failure attempt for `class_key` and persist.
+    Bounds `attempts` to the most recently-failed MAX_TRACKED_ATTEMPTS
+    class_keys (by last_ts) so the setting can't grow without bound."""
+    prev = attempts.get(class_key)
+    prev_count = prev.get("count", 0) if isinstance(prev, dict) else 0
+    attempts[class_key] = {"count": prev_count + 1, "last_ts": now}
+    if len(attempts) > MAX_TRACKED_ATTEMPTS:
+        most_recent = sorted(
+            attempts.items(),
+            key=lambda item: item[1].get("last_ts", 0) if isinstance(item[1], dict) else 0,
+            reverse=True,
+        )[:MAX_TRACKED_ATTEMPTS]
+        attempts.clear()
+        attempts.update(most_recent)
+    db.set_setting("selfext_attempts", attempts)
+
+
 def _today_proposal_count(db):
-    """Count today's tier-2 self_extend events (any status) so the daily
-    proposal cap bounds LLM cost across process restarts, not just within a
-    single call."""
+    """Count today's tier-2 self_extend events that actually reached (or
+    attempted) generation -- so the daily proposal cap bounds LLM cost
+    across process restarts, not just within a single call. Excludes
+    'skipped_low_roi' events: the ROI gate runs BEFORE generation is even
+    attempted, so a low-ROI skip must never itself consume the cap it is
+    guarding."""
     start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     count = 0
     for event in db.events("self_extend", limit=1000):
         data = event.get("data") if isinstance(event, dict) else None
-        if isinstance(data, dict) and data.get("tier") == "skill" and event.get("created_at", 0) >= start_of_day:
+        if (isinstance(data, dict) and data.get("tier") == "skill"
+                and data.get("status") != "skipped_low_roi"
+                and event.get("created_at", 0) >= start_of_day):
             count += 1
     return count
 
@@ -235,32 +286,56 @@ def act_on_gaps(gaps, settings, db, brain, sandbox_client_cls=None) -> dict:
     """Entry point called from maintenance when `settings.self_extend_enabled`.
 
     For each gap (bounded by MAX_GAPS_PER_CALL), idempotent per `class_key`
-    (dedup via the db setting `selfext_seen`):
+    via the db setting `selfext_seen` -- but `selfext_seen` is only ever set
+    on a genuine SUCCESS (see module docstring). A gap already in
+    `selfext_seen` is never reprocessed.
+
+    A gap NOT in `selfext_seen` may still have a retry record in the db
+    setting `selfext_attempts` (from a previous FIXABLE failure): if its
+    attempt count has reached `settings.self_extend_retry_max`, it is
+    permanently skipped (logged once per call as 'retry_exhausted'); if it
+    is still within `settings.self_extend_retry_cooldown_seconds` of its
+    last attempt, it is quietly skipped (no log spam) until the cooldown
+    elapses, at which point it is retried.
 
       - `suggestion == 'template'` -- TIER 1: if under
         `settings.self_extend_max_templates` and the class maps to an
         EXISTING allowlisted pure skill (chosen by the gap's structured
         tokens), append a template to `config/bounty_templates.json`
-        (auto, config-only). Skip if no safe existing skill fits, or the
-        cap is already reached.
-      - `suggestion == 'skill'` -- TIER 2: respect
+        (auto, config-only). SUCCESS marks `selfext_seen`; a fixable miss
+        (no existing skill fits, the cap is reached, or the write failed)
+        instead bumps `selfext_attempts` so it can be retried later.
+      - `suggestion == 'skill'` -- TIER 2: first, a cheap deterministic ROI
+        gate (`f916/worthwhile.assess`) checks whether the gap's measured
+        reward can recoup the cost of the expensive `brain.generate_skill`
+        call, UNLESS the gap carries PRESTIGE (reputation / future value).
+        A low-ROI gap is logged 'skipped_low_roi' and left completely
+        untouched -- NOT marked seen, NOT counted as an attempt, and the
+        daily proposal cap is NOT consumed -- so it is cheaply re-checked
+        every scan and proceeds automatically once it becomes worthwhile.
+        A worthwhile gap then respects
         `settings.self_extend_max_proposals_per_day` (counts today's
-        self_extend proposal events; stops attempting further generation
-        once at cap). Calls `brain.generate_skill(gap)`; an empty result is
-        logged and skipped. Otherwise the source is AST-scanned
-        (`codescan.is_pure_skill_source`) -- a rejection is logged with
-        reasons and the sandbox is NEVER invoked. A source that passes the
-        scan has its tests run in the isolated sandbox
-        (`sandbox_client_cls or SandboxClient`); a proposal record and
-        on-disk copy are written for human review either way. Status is
-        'ready_to_merge' iff automerge is on AND the scan passed AND the
-        sandbox tests passed; otherwise 'proposed'. The generated source is
-        NEVER imported or exec'd in this process, and nothing here
-        git-merges or redeploys.
+        self_extend proposal events; a gap hitting an already-reached cap
+        is logged 'capped' and bumps `selfext_attempts` to retry another
+        day). Otherwise calls `brain.generate_skill(gap)`; an empty result
+        is logged 'generation_empty' and bumps the attempt. Otherwise the
+        source is AST-scanned (`codescan.is_pure_skill_source`) -- a
+        rejection is logged 'scan_rejected' with reasons (the sandbox is
+        NEVER invoked) and bumps the attempt. A source that passes the scan
+        has its tests run in the isolated sandbox (`sandbox_client_cls or
+        SandboxClient`); a proposal record and on-disk copy are written for
+        human review either way, and THIS counts as SUCCESS (marks seen)
+        even when the sandbox tests failed -- the record is on file for
+        human review. Status is 'ready_to_merge' iff automerge is on AND
+        the scan passed AND the sandbox tests passed; otherwise 'proposed'.
+        The generated source is NEVER imported or exec'd in this process,
+        and nothing here git-merges or redeploys.
+      - any other `suggestion` -- nothing actionable, marked seen.
 
-    Never raises out of a single gap's processing -- failures are logged
-    under kind 'self_extend' with status 'error'. Returns a summary
-    `{'templates_added': int, 'proposals': int}`.
+    Never raises out of a single gap's processing -- an unexpected failure
+    is a FIXABLE failure too: it is logged under kind 'self_extend' with
+    status 'error' and bumps `selfext_attempts` (never marks seen). Returns
+    a summary `{'templates_added': int, 'proposals': int}`.
     """
     summary = {"templates_added": 0, "proposals": 0}
     if not isinstance(gaps, list):
@@ -268,10 +343,16 @@ def act_on_gaps(gaps, settings, db, brain, sandbox_client_cls=None) -> dict:
 
     sandbox_cls = sandbox_client_cls or SandboxClient
     seen = _seen_classes(db)
+    attempts = _attempts(db)
+    now = time.time()
+    retry_max = getattr(settings, "self_extend_retry_max", 0)
+    cooldown = getattr(settings, "self_extend_retry_cooldown_seconds", 0)
     proposals_today = _today_proposal_count(db)
     max_proposals = getattr(settings, "self_extend_max_proposals_per_day", 0)
+    exhausted_logged = set()
 
     for gap in gaps[:MAX_GAPS_PER_CALL]:
+        class_key = None
         try:
             if not isinstance(gap, dict):
                 continue
@@ -280,24 +361,54 @@ def act_on_gaps(gaps, settings, db, brain, sandbox_client_cls=None) -> dict:
                 continue
 
             suggestion = gap.get("suggestion")
+            attempt = attempts.get(class_key)
+            if isinstance(attempt, dict):
+                count = attempt.get("count", 0) if isinstance(attempt.get("count", 0), (int, float)) else 0
+                last_ts = attempt.get("last_ts", 0) if isinstance(attempt.get("last_ts", 0), (int, float)) else 0
+                if count >= retry_max:
+                    if class_key not in exhausted_logged:
+                        log_data = {"class_key": class_key, "status": "retry_exhausted"}
+                        if suggestion in ("template", "skill"):
+                            log_data["tier"] = suggestion
+                        db.log("self_extend", log_data)
+                        exhausted_logged.add(class_key)
+                    continue
+                if now - last_ts < cooldown:
+                    continue
+
             if suggestion == "template":
                 if _tier1(gap, class_key, settings, db):
                     summary["templates_added"] += 1
-                _mark_seen(db, seen, class_key)
+                    _mark_seen(db, seen, class_key)
+                else:
+                    _bump_attempt(db, attempts, class_key, now)
             elif suggestion == "skill":
+                w = worthwhile.assess(gap, settings)
+                if not w.get("worth"):
+                    db.log("self_extend", {"tier": "skill", "class_key": class_key,
+                                            "status": "skipped_low_roi",
+                                            "reward_usd": w.get("reward_usd"),
+                                            "prestige": w.get("prestige")})
+                    continue
                 if proposals_today >= max_proposals:
                     db.log("self_extend", {"tier": "skill", "class_key": class_key, "status": "capped"})
-                    proposals_today += 1
-                    _mark_seen(db, seen, class_key)
+                    _bump_attempt(db, attempts, class_key, now)
                     continue
                 proposals_today += 1
                 if _tier2(gap, class_key, settings, db, brain, sandbox_cls):
                     summary["proposals"] += 1
-                _mark_seen(db, seen, class_key)
+                    _mark_seen(db, seen, class_key)
+                else:
+                    _bump_attempt(db, attempts, class_key, now)
             else:
                 _mark_seen(db, seen, class_key)
         except Exception as exc:
             db.log("self_extend", {"status": "error", "error_type": type(exc).__name__,
-                                    "class_key": gap.get("class_key") if isinstance(gap, dict) else None})
+                                    "class_key": class_key})
+            if isinstance(class_key, str) and class_key:
+                try:
+                    _bump_attempt(db, attempts, class_key, now)
+                except Exception:
+                    pass
 
     return summary
