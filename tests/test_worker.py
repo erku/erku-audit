@@ -459,3 +459,38 @@ def test_cycle_survives_listing_with_null_award_capacity(tmp_path):
     result = w.cycle()
     assert result is not None
     assert w._last_listing_details and w._last_listing_details[0]["listing_id"] == 33
+
+
+def test_cycle_skips_listing_with_non_numeric_id(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "state.db"); db.initialize()
+    class API:
+        def get(self, path, params=None):
+            if path == "/api/listings":
+                return {"listings": [{"id": "listing-x", "expiry": 1999999999},
+                                     {"id": 41, "expiry": 1999999999}]}
+            if path == "/api/listings/41":
+                return {"listing_id": 41, "title": "t", "condition": "c",
+                        "expiry": 1999999999, "economics": {"available_award_capacity": 1}}
+            if path == "/api/official": return {"domains": ["1f916.ai"]}
+            return {}
+        def post(self, path, payload=None): return {}
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a, **k): return []
+    w = Worker(Settings(data_dir=tmp_path, api_key=""), db, API(), Brain())
+    w.cycle()  # must not raise on the non-numeric id
+    assert [d["listing_id"] for d in w._last_listing_details] == [41]
+
+
+def test_payout_ensure_for_listing_blocks_on_unparseable_identity(tmp_path):
+    from f916.payout import PayoutManager
+    db = Database(tmp_path / "s.db"); db.initialize()
+    pm = PayoutManager(Settings(data_dir=tmp_path, handle="t", payout_address="0x" + "12" * 20), db, object())
+    assert pm.ensure_for_listing({"listing_id": None, "expiry": 1999999999})["status"] == "blocked"
+    assert pm.ensure_for_listing({"listing_id": "listing-x"})["status"] == "blocked"
+    # scan_awards skips a rail row with a non-numeric id without raising / calling get
+    class Bomb:
+        def get(self, *a, **k): raise AssertionError("should not fetch a bad-id summary")
+    pm2 = PayoutManager(Settings(data_dir=tmp_path, handle="t", payout_address="0x" + "12" * 20), db, Bomb())
+    assert pm2.scan_awards([{"listing_id": "nope", "awards": [{"state": "paid"}]}]) == []

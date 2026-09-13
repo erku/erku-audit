@@ -118,8 +118,13 @@ class Worker:
         now_seconds=int(time.time())
         for listing in reversed(_list(listings,'listings')):
             if len(listing_details)>=15: break
-            if not isinstance(listing,dict) or listing.get('withdrawn_at') or int(listing.get('expiry') or 0)<=now_seconds: continue
-            detail=self._fetch(f"/api/listings/{int(listing['id'])}","submissions")
+            if not isinstance(listing,dict) or listing.get('withdrawn_at'): continue
+            try: listing_num=int(listing['id'])
+            except (KeyError,TypeError,ValueError): continue  # skip a listing without a usable numeric id
+            try: expiry_seconds=int(listing.get('expiry') or 0)
+            except (TypeError,ValueError): expiry_seconds=0
+            if expiry_seconds<=now_seconds: continue
+            detail=self._fetch(f"/api/listings/{listing_num}","submissions")
             economics=detail.get('economics',{}) if isinstance(detail,dict) else {}
             capacity=economics.get('available_award_capacity',1)
             # available_award_capacity can be null/absent/non-numeric on some
@@ -332,9 +337,14 @@ def main():
     db.log("worker", {"status":"started", "handle":settings.handle, "model":settings.ollama_model})
     try:
         while True:
-            worker.cycle()
-            worker.daily_audit()
-            worker.maintenance()
+            # Safety net: an unexpected error in any single step (e.g. an
+            # unforeseen API field type) is logged and the loop continues,
+            # rather than crashing the process into a container restart-loop.
+            for step in (worker.cycle, worker.daily_audit, worker.maintenance):
+                try:
+                    step()
+                except Exception as exc:
+                    db.log("worker_error", {"step": step.__name__, "error_type": type(exc).__name__})
             time.sleep(max(60, settings.cycle_seconds))
     except KeyboardInterrupt:
         pass

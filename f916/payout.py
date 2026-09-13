@@ -12,6 +12,14 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 def _b64(value): return base64.urlsafe_b64encode(value).decode().rstrip('=')
 
 
+def _int_or_none(value):
+    """Best-effort int from an API field (int or digit string); None otherwise."""
+    if isinstance(value, bool): return None
+    if isinstance(value, int): return value
+    if isinstance(value, str) and value.strip().lstrip('-').isdigit(): return int(value)
+    return None
+
+
 def build_binding_payload(preimage, settings):
     fields=('amount_atomic','chain_id','token','expiry','preimage')
     if not isinstance(preimage,dict) or any(key not in preimage for key in fields): raise ValueError('Incomplete payout preimage')
@@ -42,12 +50,16 @@ class PayoutManager:
         return next((item for item in rows if isinstance(item,dict) and item.get('handle',item.get('payee'))==self.settings.handle),None)
 
     def ensure_for_listing(self, listing):
-        row=f"listing-{int(listing['listing_id'])}"
+        listing_id=_int_or_none(listing.get('listing_id') if isinstance(listing,dict) else None)
+        listing_expiry=_int_or_none(listing.get('expiry') if isinstance(listing,dict) else None)
+        if listing_id is None or listing_expiry is None:
+            return {'status':'blocked','reason':'unparseable_listing_identity_or_expiry'}
+        row=f"listing-{listing_id}"
         existing=self.reconcile(row)
         if existing: return {'status':'exists','row':row,'binding':existing}
         if self.db.get_setting('payout_binding:'+row) in ('attempted','uncertain'): return {'status':'uncertain','row':row}
         if not self._wallet_live(): return {'status':'blocked','reason':'no_live_proved_wallet','row':row}
-        expiry=min(int(time.time())+2591500,int(listing['expiry']))
+        expiry=min(int(time.time())+2591500,listing_expiry)
         if expiry <= int(time.time())+300: return {'status':'blocked','reason':'listing_expired','row':row}
         prepared=self.client.get('/api/payout-bindings/preimage',params={
             'handle':self.settings.handle,'row':row,'address':self.settings.payout_address,'expiry':expiry})
@@ -64,7 +76,9 @@ class PayoutManager:
         results=[]
         for summary in listings if isinstance(listings,list) else []:
             if not isinstance(summary,dict) or not summary.get('awards'): continue
-            detail=self.client.get(f"/api/listings/{int(summary['listing_id'])}")
+            summary_id=_int_or_none(summary.get('listing_id'))
+            if summary_id is None: continue  # skip a rail row without a usable numeric id
+            detail=self.client.get(f"/api/listings/{summary_id}")
             submissions={item.get('id'):item for item in detail.get('submissions',[]) if isinstance(item,dict)}
             for award in detail.get('awards',[]):
                 own=submissions.get(award.get('submission_id'),{}).get('handle')==self.settings.handle
