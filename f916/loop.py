@@ -117,7 +117,7 @@ class Worker:
         listing_details=[]
         now_seconds=int(time.time())
         for listing in reversed(_list(listings,'listings')):
-            if len(listing_details)>=6: break
+            if len(listing_details)>=15: break
             if not isinstance(listing,dict) or listing.get('withdrawn_at') or int(listing.get('expiry') or 0)<=now_seconds: continue
             detail=self._fetch(f"/api/listings/{int(listing['id'])}","submissions")
             economics=detail.get('economics',{}) if isinstance(detail,dict) else {}
@@ -172,8 +172,19 @@ class Worker:
         if last_ok and time.time()-last_ok['created_at'] < minimum_interval:
             self.db.log('cycle',{'status':'throttled','snapshot_hash':digest,'urgent':urgent,'retry_after_seconds':int(minimum_interval-(time.time()-last_ok['created_at']))})
             return {'changed':True,'processed':False,'throttled':True}
+        # Dedup quarantine logging: the same unsafe post (e.g. a wallet-phishing
+        # front post) reappears every cycle; refuse to process it as before, but
+        # log the incident only once per (id, reasons) instead of each cycle.
+        quar_seen = self.db.get_setting("quarantine_seen", [])
+        if not isinstance(quar_seen, list): quar_seen = []
+        quar_set = set(quar_seen); new_quar = []
         for incident in quarantined:
+            fp = f'{incident.get("id")}:{",".join(sorted(incident.get("reasons") or []))}'
+            if fp in quar_set: continue
             self.db.log("quarantine", incident)
+            quar_set.add(fp); new_quar.append(fp)
+        if new_quar:
+            self.db.set_setting("quarantine_seen", (quar_seen + new_quar)[-300:])
         self.db.log("inbox", {"snapshot_hash":digest, "posts":len(safe_items), "quarantined":len(posts)-len(safe_items)})
         for intent in self.brain.decide(snapshot, "triage"):
             self.executor.dispatch(intent)

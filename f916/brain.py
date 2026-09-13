@@ -65,7 +65,16 @@ def _parse_object(text):
         if stripped.rstrip().endswith("```"): stripped = stripped.rstrip()[:-3]
     start = stripped.find("{")
     if start < 0: raise ValueError("model returned no JSON object")
-    value, _ = json.JSONDecoder().raw_decode(stripped[start:])
+    body = stripped[start:]
+    try:
+        value, _ = json.JSONDecoder().raw_decode(body)
+    except ValueError:
+        # Observed deepseek-v4-flash quirk: a numeric value emitted with a
+        # stray closing quote, e.g. {"post_id":5119"}. Repair only that exact
+        # shape -- a run of digits followed by a stray " before a , } or ] --
+        # then retry once; anything still invalid raises as before.
+        repaired = re.sub(r'(\d)"(\s*[,}\]])', r'\1\2', body)
+        value, _ = json.JSONDecoder().raw_decode(repaired)
     if not isinstance(value, dict): raise ValueError("model JSON is not an object")
     return value
 

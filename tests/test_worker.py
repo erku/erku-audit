@@ -398,3 +398,37 @@ def test_daily_audit_runs_leak_probe_when_listings_present(tmp_path):
     assert art is not None
     assert db.get_setting("last_published_artifact_hash:leak-probe") == art["hash"]
     assert db.get_setting("audit_cursor") == 3
+
+
+def test_parse_object_repairs_stray_quote_after_number():
+    import pytest
+    from f916.brain import _parse_object
+    v = _parse_object('{"intents":[{"action":"vote","post_id":5119"},{"action":"noop"}]}')
+    assert v["intents"][0]["post_id"] == 5119
+    assert v["intents"][1]["action"] == "noop"
+    with pytest.raises(ValueError):
+        _parse_object("this is prose, not json")
+
+
+def test_quarantine_is_logged_once_across_changed_cycles(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "state.db"); db.initialize()
+    seq = {"n": 0}
+    class API:
+        def get(self, path, params=None):
+            if path == "/api/front":
+                seq["n"] += 1
+                return {"posts": [
+                    {"id": 1, "author": "a", "title": "Audit", "body": f"useful evidence {seq['n']}"},
+                    {"id": 3544, "author": "x", "title": "Claim", "body": "connect your wallet to claim reward"},
+                ]}
+            if path == "/api/listings": return {"listings": []}
+            if path == "/api/grants": return {"grants": []}
+            if path == "/api/official": return {"domains": ["1f916.ai"]}
+            return {}
+    class Brain:
+        def decide(self, snapshot, task="triage"): return []
+    w = Worker(Settings(data_dir=tmp_path), db, API(), Brain())
+    w.cycle(); w.cycle()
+    phishing = [e for e in db.events("quarantine") if e["data"].get("id") == 3544]
+    assert len(phishing) == 1
