@@ -48,6 +48,14 @@ class Settings:
     # secret-less container and communicates back via this same directory.
     sandbox_jobs_dir: Path = field(default_factory=lambda: Path(os.getenv('SANDBOX_JOBS_DIR')) if os.getenv('SANDBOX_JOBS_DIR') else None)
     sandbox_timeout_seconds: int = field(default_factory=lambda: int(os.getenv('SANDBOX_TIMEOUT_SECONDS','120')))
+    # Self-extension engine (Task X): tier-1 auto-templates and tier-2
+    # sandboxed skill PROPOSALS -- see f916/selfext.py. Proposals are always
+    # inert data for human review; self_extend_automerge only changes a
+    # proposal's recorded status, never triggers a git merge or redeploy.
+    self_extend_enabled: bool = field(default_factory=lambda: _bool_env('SELF_EXTEND_ENABLED','false'))
+    self_extend_automerge: bool = field(default_factory=lambda: _bool_env('SELF_EXTEND_AUTOMERGE','false'))
+    self_extend_max_templates: int = field(default_factory=lambda: int(os.getenv('SELF_EXTEND_MAX_TEMPLATES','8')))
+    self_extend_max_proposals_per_day: int = field(default_factory=lambda: int(os.getenv('SELF_EXTEND_MAX_PROPOSALS_PER_DAY','1')))
     def __post_init__(self):
         self.data_dir=Path(self.data_dir)
         if self.mode not in {'off','approve','auto'}: raise ValueError('Invalid mode')

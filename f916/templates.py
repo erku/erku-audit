@@ -15,19 +15,41 @@ from pathlib import Path
 
 _DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "bounty_templates.json"
 
+# Agent-runtime store: tier-1 self-extension (f916.selfext) appends its
+# auto-added templates here, NEVER to the operator-curated _DEFAULT_PATH
+# above. It is agent state (like data/), not something a human curates or
+# commits -- see .gitignore.
+_AUTO_DEFAULT_PATH = Path(__file__).resolve().parent.parent / "config" / "auto_templates.json"
+
 VERDICTS = ("BID", "CAUTION", "SKIP")
 
 
-def load_templates(path=None) -> list:
-    """Load the allowlist from config/bounty_templates.json (path defaults to
-    that file resolved relative to the repo). Returns [] on any read/parse
-    error; never raises."""
-    target = Path(path) if path is not None else _DEFAULT_PATH
+def _load_raw(path) -> list:
+    """Defensively load one JSON list of template dicts. Returns [] on any
+    read/parse error, a missing file, or a non-list/non-dict shape; never
+    raises."""
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    return raw if isinstance(raw, list) else []
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def load_templates(path=None, auto_path=None) -> list:
+    """Load the allowlist by merging two stores, defensively and in order:
+    1. the operator-curated `config/bounty_templates.json` (or `path`);
+    2. the agent-runtime `config/auto_templates.json` (or `auto_path`),
+       written only by `f916.selfext`'s tier-1 auto-templates, if present.
+
+    The operator file's entries come first so a curated template always
+    wins a `match_template` search over an auto-added one for the same
+    listing. Each store is loaded independently -- a missing or malformed
+    file yields [] for that store only. Never raises."""
+    operator = _load_raw(path if path is not None else _DEFAULT_PATH)
+    auto = _load_raw(auto_path if auto_path is not None else _AUTO_DEFAULT_PATH)
+    return operator + auto
 
 
 def match_template(listing: dict, templates: list) -> dict | None:

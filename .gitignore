@@ -11,3 +11,4 @@ docs/token.7z
 build/
 dist/
 secrets/
+config/auto_templates.json

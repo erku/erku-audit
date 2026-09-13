@@ -38,6 +38,29 @@ PROJECT_RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Task X (self-extension, tier 2): the model authors a candidate PURE
+# `(target, params) -> dict` skill function plus its own pytest tests, from
+# a capability gap's STRUCTURED fields only (never raw listing prose). The
+# result is DATA for f916.selfext -- it is AST-scanned (f916.codescan) and
+# then run ONLY inside the isolated SandboxClient; this process never
+# imports or execs it, and nothing here merges or redeploys live code.
+SKILL_SYSTEM = """You are erku-audit. Author a PURE Python function `def <func_name>(target, params):` that
+deterministically checks/measures a stranger-checkable claim for this bounty class, plus pytest tests.
+Import only from math, statistics, re, json, hashlib, datetime, urllib.parse.
+No file, network, os, subprocess, eval, or exec.
+Return only JSON {func_name, source, tests}."""
+
+SKILL_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "func_name": {"type": "string"},
+        "source": {"type": "string"},
+        "tests": {"type": "string"},
+    },
+    "required": ["func_name", "source", "tests"],
+    "additionalProperties": False,
+}
+
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {"intents": {"type": "array", "maxItems": 6, "items": {
@@ -370,6 +393,109 @@ class Brain:
             # Defense in depth: this must never raise into the opportunity
             # cycle, regardless of what shape the model or transport returns.
             self.db.log("llm", {"status":"error", "task":"generate_project", "error_type":type(exc).__name__})
+            self.last_status = "error"
+            return {}
+
+    def generate_skill(self, gap):
+        """Have the model author a candidate PURE `(target, params) -> dict`
+        skill function plus pytest tests, for `f916.selfext` -- nothing
+        returned here is ever imported or exec'd by this process; the
+        source is only ever AST-scanned (`f916.codescan`) and, if that
+        passes, run in the isolated SandboxClient against the returned
+        tests. Seeded ONLY from the gap's STRUCTURED fields (class_key,
+        funder, sample_title, suggestion) via `wrap_untrusted` -- never raw
+        listing body prose. Gated by the SAME token-budget / USD-budget /
+        retry-state checks `decide()` and `generate_project()` use. Returns
+        `{'func_name': str, 'source': str, 'tests': str}` on success, or
+        `{}` on any blocked/rate-limited/parse/HTTP/oversized/malformed
+        condition. Never raises. Never logs the API key."""
+        self.last_status = "running"
+        usage = self._usage()
+        try:
+            gap_payload = {
+                "class_key": gap.get("class_key", "") if isinstance(gap, dict) else "",
+                "funder": gap.get("funder", "") if isinstance(gap, dict) else "",
+                "sample_title": gap.get("sample_title", "") if isinstance(gap, dict) else "",
+                "suggestion": gap.get("suggestion", "") if isinstance(gap, dict) else "",
+            }
+            payload = {
+                "model": self.settings.ollama_model,
+                "messages": [
+                    {"role": "system", "content": SKILL_SYSTEM},
+                    {"role": "user", "content": wrap_untrusted(gap_payload)},
+                ],
+                "format": SKILL_RESPONSE_SCHEMA,
+                "think": False,
+                "stream": False,
+                "options": {"num_predict": 4096, "temperature": 0.1},
+            }
+            if self._gate(payload, usage):
+                return {}
+            now = time.time()
+            retry_state = self.db.get_setting("llm_retry_state", {})
+            started = time.monotonic()
+            try:
+                response = self.session.post("/api/chat", json=payload)
+                response.raise_for_status()
+                result = response.json()
+                content = result.get("message", {}).get("content", "")
+                parsed = _parse_object(content)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (429, 503):
+                    retry_epoch = recovery.parse_retry_after(exc.response.headers.get("Retry-After"), now)
+                    new_state = recovery.record_rate_limit(retry_state, retry_epoch, now,
+                                                            self.settings.llm_retry_base_seconds,
+                                                            self.settings.llm_retry_cap_seconds)
+                    self.db.set_setting("llm_retry_state", new_state)
+                    self.db.log("llm", {"status":"rate_limited", "task":"generate_skill",
+                                        "reason":"ollama_retry_pending", "blocked_until":new_state["blocked_until"]})
+                    self.last_status = "rate_limited"
+                    return {}
+                self.db.log("llm", {"status":"error", "task":"generate_skill", "error_type":type(exc).__name__,
+                                    "duration":time.monotonic()-started,
+                                    "response_preview":redact(locals().get("content", ""))[:500]})
+                self.last_status = "error"
+                return {}
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                self.db.log("llm", {"status":"error", "task":"generate_skill", "error_type":type(exc).__name__,
+                                    "duration":time.monotonic()-started,
+                                    "response_preview":redact(locals().get("content", ""))[:500]})
+                self.last_status = "error"
+                return {}
+
+            if self.db.get_setting("llm_retry_state"):
+                self.db.set_setting("llm_retry_state", {})
+            prompt_tokens = int(result.get("prompt_eval_count") or 0)
+            output_tokens = int(result.get("eval_count") or 0)
+            cost = (prompt_tokens*self.settings.llm_input_usd_per_million + output_tokens*self.settings.llm_output_usd_per_million)/1_000_000
+            usage["tokens"] += prompt_tokens + output_tokens
+            usage["cost_usd"] = round(float(usage.get("cost_usd", 0)) + cost, 8)
+            self.db.set_setting("llm_usage", usage)
+
+            func_name = parsed.get("func_name") if isinstance(parsed, dict) else None
+            source = parsed.get("source") if isinstance(parsed, dict) else None
+            tests = parsed.get("tests") if isinstance(parsed, dict) else None
+            if not (isinstance(func_name, str) and func_name.isidentifier()
+                    and isinstance(source, str) and source
+                    and isinstance(tests, str) and tests):
+                self.db.log("llm", {"status":"error", "task":"generate_skill", "reason":"invalid_skill_shape"})
+                self.last_status = "error"
+                return {}
+            if len(source.encode("utf-8")) > MAX_FILE_BYTES or len(tests.encode("utf-8")) > MAX_FILE_BYTES:
+                self.db.log("llm", {"status":"error", "task":"generate_skill", "reason":"file_too_large"})
+                self.last_status = "error"
+                return {}
+
+            self.db.log("llm", {"status":"ok", "task":"generate_skill",
+                                "model":result.get("model", self.settings.ollama_model),
+                                "prompt_tokens":prompt_tokens, "output_tokens":output_tokens, "cost_usd":cost,
+                                "duration":time.monotonic()-started, "func_name":func_name})
+            self.last_status = "ok"
+            return {"func_name": func_name, "source": source, "tests": tests}
+        except Exception as exc:
+            # Defense in depth: this must never raise into the self-extension
+            # pipeline, regardless of what shape the model or transport returns.
+            self.db.log("llm", {"status":"error", "task":"generate_skill", "error_type":type(exc).__name__})
             self.last_status = "error"
             return {}
 

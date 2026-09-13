@@ -46,6 +46,63 @@ def test_load_templates_never_raises_on_bad_path_or_content(tmp_path):
     assert load_templates(not_a_list) == []
 
 
+def test_load_templates_merges_operator_and_auto_stores_operator_first(tmp_path):
+    operator_path = tmp_path / "bounty_templates.json"
+    operator_path.write_text(json.dumps([
+        {"id": "operator-one", "skill": "rail-report", "builder": "rail_self_report", "title_contains": ["stranger"]},
+    ]), encoding="utf-8")
+    auto_path = tmp_path / "auto_templates.json"
+    auto_path.write_text(json.dumps([
+        {"id": "auto-one", "skill": "batch-cadence", "builder": "batch_cadence", "title_contains": ["cadence"]},
+    ]), encoding="utf-8")
+
+    merged = load_templates(operator_path, auto_path)
+
+    assert [t["id"] for t in merged] == ["operator-one", "auto-one"]
+
+
+def test_load_templates_tolerates_missing_or_malformed_auto_store(tmp_path):
+    operator_path = tmp_path / "bounty_templates.json"
+    operator_path.write_text(json.dumps([
+        {"id": "operator-one", "skill": "rail-report", "builder": "rail_self_report", "title_contains": ["stranger"]},
+    ]), encoding="utf-8")
+
+    # Missing auto store -- operator entries still load.
+    assert [t["id"] for t in load_templates(operator_path, tmp_path / "missing-auto.json")] == ["operator-one"]
+
+    # Malformed auto store -- operator entries still load, auto contributes nothing.
+    bad_auto = tmp_path / "bad_auto.json"
+    bad_auto.write_text("not json", encoding="utf-8")
+    assert [t["id"] for t in load_templates(operator_path, bad_auto)] == ["operator-one"]
+
+    # Auto store with a non-dict entry -- that entry is skipped, not raised.
+    mixed_auto = tmp_path / "mixed_auto.json"
+    mixed_auto.write_text(json.dumps(["not-a-dict", {"id": "auto-good", "skill": "batch-cadence",
+                                                       "builder": "batch_cadence", "title_contains": ["cadence"]}]),
+                           encoding="utf-8")
+    assert [t["id"] for t in load_templates(operator_path, mixed_auto)] == ["operator-one", "auto-good"]
+
+
+def test_load_templates_operator_entry_wins_a_match_over_an_auto_entry():
+    from f916.templates import match_template
+    operator_entry = {"id": "operator", "skill": "rail-report", "builder": "rail_self_report",
+                       "title_contains": ["stranger"]}
+    auto_entry = {"id": "auto", "skill": "batch-cadence", "builder": "batch_cadence",
+                  "title_contains": ["stranger"]}
+    merged = [operator_entry, auto_entry]
+    matched = match_template(listing(title="A stranger-checkable rail listing"), merged)
+    assert matched["id"] == "operator"
+
+
+def test_real_operator_seed_file_has_exactly_five_curated_templates_and_is_never_selfext_written():
+    from f916.templates import _DEFAULT_PATH
+    on_disk = json.loads(_DEFAULT_PATH.read_text(encoding="utf-8"))
+    assert isinstance(on_disk, list)
+    assert len(on_disk) == 5
+    assert {t["id"] for t in on_disk} == {"rail-state-self-report", "award-slot-census",
+                                           "rail-false-number", "break-the-rail", "batch-cadence"}
+
+
 # --- match_template ---------------------------------------------------------
 
 def test_match_template_requires_all_substrings_and_returns_first_match():
