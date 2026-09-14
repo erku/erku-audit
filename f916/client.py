@@ -2,9 +2,28 @@ import hashlib, json, time
 from pathlib import Path
 import httpx
 
+# Cosmetic OpenAPI fields the platform may edit without any behavioural change.
+# Hashing them froze all writes for hours when a single endpoint's prose was
+# extended (see contract-freeze incident). We hash only the structural surface.
+#   - now/now_utc: server clock, always varies.
+#   - example/examples: pure annotation keywords; drop unconditionally.
+#   - description/summary: OpenAPI annotations are ALWAYS strings, whereas a
+#     request-schema property literally named "description" is a dict -> we drop
+#     these two ONLY when the value is a str, so real schema properties survive.
+_COSMETIC_ANY={'now','now_utc','example','examples'}
+_COSMETIC_STR={'description','summary'}
+def _structural(value):
+    if isinstance(value,dict):
+        out={}
+        for k,v in value.items():
+            if k in _COSMETIC_ANY: continue
+            if k in _COSMETIC_STR and isinstance(v,str): continue
+            out[k]=_structural(v)
+        return out
+    if isinstance(value,list): return [_structural(v) for v in value]
+    return value
 def contract_hash(value):
-    stable={k:v for k,v in value.items() if k not in {'now','now_utc'}}
-    return hashlib.sha256(json.dumps(stable,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(_structural(value),sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 class Client:
     def __init__(self,settings,db,transport=None):

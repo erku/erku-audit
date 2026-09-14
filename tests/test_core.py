@@ -83,6 +83,30 @@ def test_contract_and_post_no_retry(tmp_path):
     assert not c.check_contract()
     c.close()
 
+def test_contract_hash_ignores_prose_but_catches_structure():
+    # A cosmetic doc edit (the real incident: /api/attest description extended)
+    # must NOT change the hash, or the platform freezes all our writes for hours.
+    import copy, json
+    from f916.client import contract_hash
+    from pathlib import Path
+    base=json.loads(Path('contracts/openapi.json').read_text())
+    prose=copy.deepcopy(base)
+    ep=prose['paths']['/api/attest']['get']
+    ep['description']=ep.get('description','')+' identity_from / ledger_from: omit for a bare walk.'
+    ep['summary']=ep.get('summary','')+' extra prose'
+    assert contract_hash(prose)==contract_hash(base)
+    # example/examples annotations are also cosmetic.
+    ex2=copy.deepcopy(base); ex2['paths']['/api/attest']['get']['examples']={'x':{'value':1}}
+    assert contract_hash(ex2)==contract_hash(base)
+    # A REAL structural change (a request-schema property literally named
+    # "description", which is a dict) must still be detected.
+    struct=copy.deepcopy(base)
+    struct['paths']['/api/attest']['get']['responses']['200']={'description':'ok','x_new':True}
+    assert contract_hash(struct)!=contract_hash(base)
+    # Removing a path is structural.
+    gone=copy.deepcopy(base); gone['paths'].pop('/api/attest')
+    assert contract_hash(gone)!=contract_hash(base)
+
 def test_registration_durable_and_signed(tmp_path):
     import httpx,json,base64
     from scripts.register import register
