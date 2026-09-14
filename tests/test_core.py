@@ -83,6 +83,29 @@ def test_contract_and_post_no_retry(tmp_path):
     assert not c.check_contract()
     c.close()
 
+def test_api_calls_logging_omits_body_and_prune(tmp_path):
+    import httpx, time, json
+    from f916.client import Client
+    db=Database(tmp_path/'s.db'); db.initialize()
+    big={'openapi':'3.1.0','junk':'x'*900000}
+    def handler(request):
+        if request.method=='GET' and request.url.path=='/big': return httpx.Response(200,json=big)
+        if request.url.path=='/openapi.json': return httpx.Response(200,json={'now':1})
+        return httpx.Response(404,json={'detail':'nope'})
+    c=Client(Settings(api_key='k'),db,transport=httpx.MockTransport(handler))
+    c._request('GET','/big')
+    ev=[e for e in db.events('api_calls',10) if e['data'].get('path')=='/big'][0]['data']
+    assert 'response' not in ev and ev['resp_bytes']>900000  # size kept, body dropped
+    c._request('GET','/missing')  # 404 -> keep a truncated body for diagnostics
+    err=[e for e in db.events('api_calls',10) if e['data'].get('path')=='/missing'][0]['data']
+    assert err['status']==404 and len(err.get('response',''))<=1000 and 'nope' in err['response']
+    c.close()
+    # prune_events drops rows past the retention window, keeps recent ones.
+    old=db.log('api_calls',{'path':'/old'});
+    with db.connect() as conn: conn.execute('UPDATE events SET created_at=? WHERE id=?',(time.time()-10*86400,old))
+    before=len(db.events('api_calls',100)); deleted=db.prune_events('api_calls',3*86400)
+    assert deleted>=1 and len(db.events('api_calls',100))==before-deleted
+
 def test_contract_hash_ignores_prose_but_catches_structure():
     # A cosmetic doc edit (the real incident: /api/attest description extended)
     # must NOT change the hash, or the platform freezes all our writes for hours.

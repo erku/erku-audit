@@ -40,7 +40,14 @@ class Client:
                 response=self.session.request(method,self._path(path),**kwargs)
                 try: body=response.json()
                 except ValueError: body={'non_json':True}
-                self.db.log('api_calls',{'method':method,'path':path,'payload':kwargs.get('json',kwargs.get('params')),'status':response.status_code,'duration':time.monotonic()-started,'response':body})
+                # Do NOT persist full response bodies: large ones (e.g.
+                # /openapi.json, listing walks ~800KB each) bloated the events
+                # table to ~760MB and made the dashboard take 30s/page. Keep the
+                # size, and only a truncated body for error responses (the useful
+                # diagnostic case). Nothing reads api_calls['response'] downstream.
+                entry={'method':method,'path':path,'payload':kwargs.get('json',kwargs.get('params')),'status':response.status_code,'duration':time.monotonic()-started,'resp_bytes':len(response.content)}
+                if response.status_code>=400: entry['response']=str(body)[:1000]
+                self.db.log('api_calls',entry)
                 if method=='GET' and response.status_code in {429,502,503,504} and attempt<2:
                     try: delay=min(2,max(0,float(response.headers.get('Retry-After',0.2*(attempt+1)))))
                     except ValueError: delay=0.2

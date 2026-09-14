@@ -339,6 +339,13 @@ class Worker:
             # Market radar + tier-1 self-extension now run every cycle (see
             # Worker.cycle) so a new bounty class is picked up within
             # minutes rather than waiting for this once-a-day block.
+            # Retention: api_calls are high-volume diagnostics; keep 3 days so
+            # the events table (and the dashboard's scans) stay small.
+            try:
+                pruned=self.db.prune_events("api_calls", 3*86400)
+                if pruned: self.db.log("prune", {"kind":"api_calls","deleted":pruned})
+            except Exception as exc:
+                self.db.log("prune", {"status":"error","error_type":type(exc).__name__})
             self.db.set_setting("last_maintenance", day)
         week = time.strftime("%G-W%V", time.gmtime())
         if self.db.get_setting("last_reward_week") != week:
