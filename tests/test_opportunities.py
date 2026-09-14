@@ -91,6 +91,32 @@ def test_unsupported_and_project_work_never_publish_or_submit(tmp_path):
     assert runner.process(listing(audit={"skill": "unknown", "target": {}}))["status"] == "unsupported"
     assert runner.process(listing(condition="Implement a fix and open a pull request."))["status"] == "project_required"
     assert {event["data"]["classification"] for event in db.events("opportunity")} == {"unsupported", "project_required"}
+    # Broker dormant: no project_qualifiable signal for a generic (no-template)
+    # project_required listing.
+    assert db.events("project_qualifiable", 10) == []
+
+
+def test_dormant_broker_flags_template_matching_listing_only(tmp_path):
+    # Option B: broker off (no broker_url/token) -> no repo, no submit, but a
+    # project_required listing that MATCHES a curated template is flagged
+    # 'project_qualifiable' so the operator knows arming the broker would pay.
+    db = Database(tmp_path / "state.db"); db.initialize()
+    class Bomb:
+        def __getattr__(self, name): raise AssertionError(name)
+    runner = OpportunityRunner(Settings(data_dir=tmp_path), db, Bomb(), Bomb(), Bomb())
+    matching = listing(listing_id=23, title="A window into 1F916",
+                       condition="Fix the repository and provide a regression test.")
+    assert runner.process(matching)["status"] == "project_required"
+    q = db.events("project_qualifiable", 10)
+    assert len(q) == 1 and q[0]["data"]["listing_id"] == 23
+    assert q[0]["data"]["template"] == "static-report" and q[0]["data"]["needs_llm"] is False
+    # A project_required listing that matches NO template is not flagged.
+    runner.process(listing(listing_id=24, title="Audit the security review",
+                           condition="Fix the repository and provide a regression test."))
+    assert len(db.events("project_qualifiable", 10)) == 1
+    # Idempotent: re-processing the same listing does not double-log.
+    runner.process(matching)
+    assert len(db.events("project_qualifiable", 10)) == 1
 
 
 def test_uncertain_seal_or_submission_is_not_retried(tmp_path):

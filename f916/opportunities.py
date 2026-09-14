@@ -316,6 +316,24 @@ class OpportunityRunner:
         if classification == "project_required":
             if project_active:
                 return self.run_project(listing, evaluation)
+            # Broker dormant (Option B): create no repo and submit nothing, but
+            # still run the OFFLINE, never-raising qualification probe so the
+            # operator gets a concrete "arming the broker would pay off now"
+            # signal for the rare project_required listing a curated template
+            # can actually serve -- versus the generic project_required stream
+            # that no template matches. Logged once per opportunity.
+            if not state.get("qualifiable_logged"):
+                try:
+                    spec = qualify(evaluation, listing, load_project_templates(),
+                                   existing_project_count=len(self.db.get_setting("project_repos", [])),
+                                   max_projects=self.settings.max_projects)
+                except Exception:
+                    spec = None
+                if spec is not None:
+                    self.db.log("project_qualifiable", {"listing_id": evaluation["listing_id"],
+                                "template": spec["template"], "needs_llm": spec["needs_llm"],
+                                "name": spec["name"]})
+                    state = self._save(self._key(evaluation), state, classification, qualifiable_logged=True)
             return state
         if classification != "supported":
             return state

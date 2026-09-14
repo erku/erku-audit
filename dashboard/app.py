@@ -118,7 +118,18 @@ def _market_summary(db):
         key = data.get('class_key')
         if key is not None and key not in gaps_by_key:
             gaps_by_key[key] = data
-    return {'top_earners': top_earners, 'gaps': list(gaps_by_key.values())[:15]}
+    # Project listings a curated template can actually serve if the (currently
+    # dormant) broker is armed -- the concrete "arm the broker now" signal.
+    qualifiable = {}
+    for event in db.events('project_qualifiable', 200):
+        data = event.get('data') if isinstance(event, dict) else None
+        if not isinstance(data, dict):
+            continue
+        lid = data.get('listing_id')
+        if lid is not None and lid not in qualifiable:
+            qualifiable[lid] = data
+    return {'top_earners': top_earners, 'gaps': list(gaps_by_key.values())[:15],
+            'qualifiable': list(qualifiable.values())[:15]}
 
 
 def _build_results(db):
