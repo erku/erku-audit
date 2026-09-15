@@ -23,6 +23,7 @@
 
 ---
 
+**Recommended execution model:** `gpt-5.6-terra` with reasoning effort `high` — balanced implementation cost with enough reasoning for scoring and ranking semantics.
 ### Task 1: Pure Opportunity Scoring and Ranking
 
 **Files:**
@@ -95,6 +96,7 @@ Commit: `feat: rank earning opportunities by evidence and ROI`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-terra` with reasoning effort `high` — cost-efficient for schema design, validation boundaries, and test-driven catalog integration.
 ### Task 2: Reviewed Capability Recipe Catalog
 
 **Files:**
@@ -145,6 +147,7 @@ Commit: `feat: add reviewed earning capability recipes`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-terra` with reasoning effort `high` — sufficient for a broad mechanical migration while preserving broker security invariants.
 ### Task 3: Repository Prefix Migration and Broker Activation Boundary
 
 **Files:**
@@ -192,6 +195,7 @@ Commit: `feat: authorize bounded 1f916 repository publishing`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-sol` with reasoning effort `high` — reserved for the cross-cutting budget, accounting, cache, and request-gating logic where mistakes have system-wide impact.
 ### Task 4: Rolling Weekly Budget Policy and LLM Cache
 
 **Files:**
@@ -244,6 +248,7 @@ Commit: `feat: preserve weekly model budget for earning work`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-sol` with reasoning effort `high` — reserved for concurrency-sensitive retry, idempotency, and persisted state-machine behavior.
 ### Task 5: Resilient Listing Reads and Opportunity State Machine
 
 **Files:**
@@ -286,6 +291,7 @@ Commit: `fix: isolate market failures and persist opportunity retries`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-terra` with reasoning effort `medium` — the interfaces are established, so moderate reasoning minimizes cost while retaining reliable integration work.
 ### Task 6: Dashboard for Ranked Opportunities, Funnel, and Budget Bands
 
 **Files:**
@@ -324,6 +330,7 @@ Commit: `feat: expose earning funnel and weekly reserve`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-luna` with reasoning effort `medium` — optimized for the high-volume, well-specified documentation and consistency pass.
 ### Task 7: Project Instructions and Current Documentation
 
 **Files:**
@@ -380,6 +387,7 @@ Commit: `docs: establish current agent operating guidance`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-terra` with reasoning effort `high` — balances cost with the careful operational and secret-handling checks required for deployment preparation.
 ### Task 8: Compose Configuration and Safe Broker Bootstrap
 
 **Files:**
@@ -428,6 +436,7 @@ Commit: `ops: add guarded earning-autopilot deployment preflight`
 
 ---
 
+**Recommended execution model:** `gpt-5.6-terra` with reasoning effort `high` — deployment verification needs disciplined interpretation of failures and runtime evidence, but not flagship-level open-ended design.
 ### Task 9: Full Verification, Rebuild, and Runtime Reconciliation
 
 **Files:**
