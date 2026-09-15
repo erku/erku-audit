@@ -106,6 +106,14 @@ def test_health_and_budget_status_are_visible(panel):
     assert 'Stan workera i budżet Ollama' in page.text
 
 
+def test_dashboard_shows_persisted_recovery_status_and_next_analysis(panel):
+    client, db = panel
+    db.set_setting('llm_retry_state', {'attempts': 2, 'blocked_until': 4102444800, 'last': 4102444700})
+    page = client.get('/settings', auth=('admin', 'test-password'))
+    assert 'Status recovery: <strong>oczekuje na Ollama' in page.text
+    assert '2100-01-01 00:00:00 UTC' in page.text
+
+
 def test_results_page_renders_on_empty_db(panel):
     client, db = panel
     response = client.get('/results', auth=('admin', 'test-password'))

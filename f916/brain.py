@@ -221,7 +221,7 @@ class Brain:
             parsed = _parse_object(content)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in (429, 503):
-                retry_epoch = recovery.parse_retry_after(exc.response.headers.get("Retry-After"), now)
+                retry_epoch = recovery.parse_retry_headers(exc.response.headers, now)
                 new_state = recovery.record_rate_limit(retry_state, retry_epoch, now,
                                                         self.settings.llm_retry_base_seconds,
                                                         self.settings.llm_retry_cap_seconds)
@@ -236,6 +236,15 @@ class Brain:
             self.last_status = "error"
             return []
         except (httpx.HTTPError, ValueError, TypeError) as exc:
+            if isinstance(exc, httpx.HTTPError):
+                new_state = recovery.record_rate_limit(retry_state, None, now,
+                                                        self.settings.llm_retry_base_seconds,
+                                                        self.settings.llm_retry_cap_seconds)
+                self.db.set_setting("llm_retry_state", new_state)
+                self.db.log("llm", {"status":"rate_limited", "reason":"ollama_retry_pending",
+                                    "blocked_until":new_state["blocked_until"]})
+                self.last_status = "rate_limited"
+                return []
             self.db.log("llm", {"status":"error", "task":task, "error_type":type(exc).__name__,
                                 "duration":time.monotonic()-started,
                                 "response_preview":redact(locals().get("content", ""))[:500]})

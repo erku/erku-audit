@@ -21,6 +21,18 @@ def test_parse_retry_after_returns_none_for_junk():
     assert recovery.parse_retry_after("", now) is None
 
 
+def test_parse_retry_headers_accepts_ollama_reset_when_retry_after_is_absent():
+    now = 1000.0
+    assert recovery.parse_retry_headers({"X-RateLimit-Reset": "1030"}, now) == 1030.0
+    assert recovery.parse_retry_headers({"RateLimit-Reset": "30"}, now) == 1030.0
+
+
+def test_parse_retry_headers_prefers_retry_after_over_reset():
+    now = 1000.0
+    headers = {"Retry-After": "20", "X-RateLimit-Reset": "9999"}
+    assert recovery.parse_retry_headers(headers, now) == 1020.0
+
+
 def test_backoff_seconds_monotonic_and_clamped_to_cap():
     base, cap = 60, 3600
     values = [recovery.backoff_seconds(n, base, cap) for n in range(1, 10)]

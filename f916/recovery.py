@@ -25,6 +25,34 @@ def parse_retry_after(value, now):
         return None
 
 
+def parse_retry_headers(headers, now):
+    """Return the retry time from standard rate-limit headers, or ``None``.
+
+    ``Retry-After`` wins when supplied.  Otherwise accept epoch-form
+    ``X-RateLimit-Reset`` and delta-seconds ``RateLimit-Reset`` headers.
+    """
+    headers = headers or {}
+    values = {str(key).lower(): value for key, value in headers.items()}
+    retry_after = parse_retry_after(values.get("retry-after"), now)
+    if retry_after is not None:
+        return retry_after
+    for name in ("x-ratelimit-reset", "ratelimit-reset", "x-ratelimit-reset-after"):
+        value = values.get(name)
+        if value is None:
+            continue
+        try:
+            number = float(str(value).strip())
+        except (TypeError, ValueError):
+            parsed = parse_retry_after(value, now)
+            if parsed is not None and parsed > now:
+                return parsed
+            continue
+        candidate = number if name == "x-ratelimit-reset" and number > now else now + number
+        if candidate > now:
+            return candidate
+    return None
+
+
 def backoff_seconds(attempts, base, cap):
     """Exponential backoff base*2**(attempts-1) clamped to [base, cap]. attempts>=1."""
     attempts = max(1, int(attempts))

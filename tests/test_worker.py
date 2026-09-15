@@ -277,6 +277,60 @@ def test_cycle_ordinary_cadence_is_one_hour_not_three(tmp_path):
     assert not any(e["data"].get("status") == "throttled" for e in db.events("cycle"))
 
 
+def test_cycle_ordinary_cadence_throttles_before_an_hour(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "state.db"); db.initialize()
+    db.log("llm", {"status": "ok", "task": "triage"})
+    with db.connect() as c:
+        c.execute("UPDATE events SET created_at=? WHERE kind='llm'", (time.time() - 1800,))
+
+    class API:
+        def get(self, path, params=None):
+            if path == "/api/front":
+                return {"posts": [{"id": 1, "author": "a", "title": "t", "body": "evidence body"}]}
+            return {}
+
+    class Brain:
+        calls = 0
+        last_status = "ok"
+        def decide(self, snapshot, task="triage"):
+            self.calls += 1
+            return []
+
+    brain = Brain()
+    result = Worker(Settings(data_dir=tmp_path), db, API(), brain).cycle()
+    assert result["throttled"] is True
+    assert brain.calls == 0
+
+
+def test_cycle_urgent_cadence_allows_a_shorter_path(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "state.db"); db.initialize()
+    db.log("llm", {"status": "ok", "task": "triage"})
+    with db.connect() as c:
+        c.execute("UPDATE events SET created_at=? WHERE kind='llm'", (time.time() - 2000,))
+
+    class API:
+        def get(self, path, params=None):
+            if path == "/api/me":
+                return {"since_last_visit": {"replies": [{"id": 9, "body": "please review"}]}}
+            if path == "/api/front":
+                return {"posts": [{"id": 1, "author": "a", "title": "t", "body": "evidence body"}]}
+            return {}
+
+    class Brain:
+        calls = 0
+        last_status = "ok"
+        def decide(self, snapshot, task="triage"):
+            self.calls += 1
+            return []
+
+    brain = Brain()
+    result = Worker(Settings(data_dir=tmp_path, api_key="key"), db, API(), brain).cycle()
+    assert result["processed"] is True
+    assert brain.calls == 1
+
+
 def test_brain_short_circuits_when_retry_state_blocks(tmp_path):
     from f916.brain import Brain
     called = False
@@ -317,6 +371,20 @@ def test_brain_bounds_backoff_when_429_has_no_retry_after(tmp_path):
     brain = Brain(settings, db, transport=httpx.MockTransport(handler))
     assert brain.decide({"items": []}) == []
     state = db.get_setting("llm_retry_state")
+    assert 60 <= state["blocked_until"] - before <= 120
+
+
+def test_brain_persists_bounded_recovery_after_transport_error(tmp_path):
+    from f916.brain import Brain
+    def handler(request):
+        raise httpx.ConnectError("Ollama unavailable", request=request)
+    db = Database(tmp_path / "state.db"); db.initialize()
+    settings = Settings(data_dir=tmp_path, llm_retry_base_seconds=60, llm_retry_cap_seconds=120)
+    before = time.time()
+    brain = Brain(settings, db, transport=httpx.MockTransport(handler))
+    assert brain.decide({"items": []}) == []
+    state = db.get_setting("llm_retry_state")
+    assert state["attempts"] == 1
     assert 60 <= state["blocked_until"] - before <= 120
 
 
