@@ -225,7 +225,7 @@ def evaluate_opportunity(listing):
 
 
 class OpportunityRunner:
-    TERMINAL = frozenset({"submitted", "submission_queued", "submission_uncertain", "seal_uncertain", "unsupported", "project_required"})
+    TERMINAL = frozenset({"submitted", "submission_queued", "submission_uncertain", "publish_uncertain", "seal_uncertain", "unsupported", "project_required"})
     # Terminal states for the project-autopilot pipeline (see run_project):
     # a per-listing key attempted exactly once, distinct from TERMINAL above.
     PROJECT_TERMINAL = frozenset({
@@ -348,10 +348,18 @@ class OpportunityRunner:
                 return self._save(key, state, "publish_failed", reason="publisher_unavailable")
             try:
                 artifact = self.publisher.publish(artifact)
-            except Exception as exc:
+            except (FileNotFoundError, ValueError) as exc:
                 self.db.log("opportunity_error", {"listing_id": evaluation["listing_id"],
                             "stage": "publish", "error_type": type(exc).__name__})
                 return self._save(key, state, "publish_failed", artifact=artifact)
+            except Exception as exc:
+                # Publication may have reached the public repository before a
+                # transport/process failure is reported. Without a durable
+                # confirmation, keep the listing terminal and require an
+                # operator to reconcile it rather than duplicating a write.
+                self.db.log("opportunity_error", {"listing_id": evaluation["listing_id"],
+                            "stage": "publish", "error_type": type(exc).__name__, "uncertain": True})
+                return self._save(key, state, "publish_uncertain", artifact=artifact)
             state = self._save(key, state, "published", artifact=artifact)
 
         if artifact.get("seal_id") is None:

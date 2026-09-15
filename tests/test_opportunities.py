@@ -149,12 +149,25 @@ def test_uncertain_seal_or_submission_is_not_retried(tmp_path):
     assert calls.count("submit") == 1
 
 
+def test_uncertain_publish_is_not_retried(tmp_path):
+    db = Database(tmp_path / "state.db"); db.initialize(); calls = []
+    class Publisher:
+        def publish(self, artifact):
+            calls.append("publish")
+            raise TimeoutError("outcome unknown")
+    runner = OpportunityRunner(Settings(data_dir=tmp_path), db, object(), object(), Publisher())
+
+    assert runner.process(listing())["status"] == "publish_uncertain"
+    assert runner.process(listing())["status"] == "publish_uncertain"
+    assert calls == ["publish"]
+
+
 def test_definite_publish_failure_can_resume_from_saved_artifact(tmp_path):
     db = Database(tmp_path / "state.db"); db.initialize(); attempts = []
     class Publisher:
         def publish(self, artifact):
             attempts.append(artifact["hash"])
-            if len(attempts) == 1: raise RuntimeError("not published")
+            if len(attempts) == 1: raise ValueError("not published")
             return artifact | {"commit": "e" * 40, "public_url": "https://example.test/evidence"}
     class API:
         def post(self, path, payload): return {"id": 90}
