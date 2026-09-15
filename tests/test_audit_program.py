@@ -1,6 +1,7 @@
 import re
 
-from f916.audit_program import ROTATION, build_inputs, plan_next_audit
+from f916.audit_program import ROTATION, build_inputs, input_fingerprint, plan_next_audit
+from f916.skills import run as run_skill
 
 LABEL_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
@@ -45,6 +46,14 @@ def test_same_cursor_and_inputs_is_stable():
     job1 = plan_next_audit(2, inputs)
     job2 = plan_next_audit(2, inputs)
     assert job1 == job2
+
+
+def test_input_fingerprint_is_stable_across_mapping_order():
+    first = {"skill": "leak-probe", "target": {"listings": [{"title": "x", "listing_id": 1}]},
+             "params": {}, "listing_id": None}
+    second = {"params": {}, "listing_id": None,
+              "target": {"listings": [{"listing_id": 1, "title": "x"}]}, "skill": "leak-probe"}
+    assert input_fingerprint(first) == input_fingerprint(second)
 
 
 # 3. missing inputs for a slot are skipped in favor of the next runnable slot
@@ -110,6 +119,12 @@ def test_build_inputs_leak_target_from_titles_and_conditions():
 def test_build_inputs_leak_target_none_when_no_public_fields():
     inputs = build_inputs(client=None, listings_details=[{"listing_id": 1}])
     assert inputs["leak_target"] is None
+
+
+def test_leak_probe_is_inconclusive_without_a_data_surface(tmp_path):
+    result = run_skill("leak-probe", {}, {}, tmp_path)
+    assert result["status"] == "inconclusive"
+    assert result["findings"] == []
 
 
 def test_build_inputs_gate_target_none_without_policy_tokens():

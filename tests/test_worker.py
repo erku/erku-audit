@@ -365,12 +365,20 @@ def test_daily_audit_rotation_advances_cursor_and_dedupes(tmp_path):
     class Brain:
         last_status = "ok"
         def decide(self, *a): return []
-    w = Worker(Settings(data_dir=tmp_path, api_key="", handle="self"), db, API(), Brain())
+    class Publisher:
+        def __init__(self): self.calls = 0
+        def publish(self, artifact):
+            self.calls += 1
+            return artifact | {"public_url": f"https://example.test/{artifact['hash']}"}
+    publisher = Publisher()
+    w = Worker(Settings(data_dir=tmp_path, api_key="", handle="self"), db, API(), Brain(), publisher=publisher)
     w._last_listing_details = []  # no rail/leak/gate inputs -> self-redteam fallback
     art = w.daily_audit()
     assert art is not None
     assert db.get_setting("audit_cursor") == 1
     assert db.get_setting("last_published_artifact_hash:self-redteam") == art["hash"]
+    assert db.get_setting("last_audit_input_fingerprint:self-redteam")
+    assert publisher.calls == 1
     assert db.events("artifact")
     # same UTC day -> no second audit
     assert w.daily_audit() is None
@@ -379,7 +387,28 @@ def test_daily_audit_rotation_advances_cursor_and_dedupes(tmp_path):
     db.set_setting("last_daily_audit", "1970-01-01")
     art2 = w.daily_audit()
     assert art2["hash"] == art["hash"]
+    assert publisher.calls == 1
     assert any(e["data"].get("status") == "unchanged" for e in db.events("artifact_check"))
+
+
+def test_daily_audit_records_type_and_stable_input_fingerprint(tmp_path):
+    from f916.loop import Worker
+    db = Database(tmp_path / "s.db"); db.initialize()
+    class API:
+        def post(self, path, payload=None): return {"id": 1}
+        def get(self, path, params=None): return {}
+    class Brain:
+        last_status = "ok"
+        def decide(self, *a): return []
+    worker = Worker(Settings(data_dir=tmp_path, api_key="", handle="self"), db, API(), Brain())
+    worker._last_listing_details = []
+    artifact = worker.daily_audit()
+    event = db.last_event("artifact")["data"]
+    fingerprint = db.get_setting("last_audit_input_fingerprint:self-redteam")
+    assert event["audit_type"] == "self-redteam"
+    assert event["input_fingerprint"] == fingerprint
+    assert len(fingerprint) == 64
+    assert artifact["input_fingerprint"] == fingerprint
 
 
 def test_daily_audit_runs_leak_probe_when_listings_present(tmp_path):

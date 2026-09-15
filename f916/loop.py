@@ -19,7 +19,7 @@ from .publisher import Publisher
 from .seal import seal_artifact
 from .payout import PayoutManager
 from .opportunities import OpportunityRunner
-from .audit_program import build_inputs, plan_next_audit
+from .audit_program import build_inputs, input_fingerprint, plan_next_audit
 
 
 def _list(data, key):
@@ -267,6 +267,20 @@ class Worker:
         binding = {"listing_id": listing_id} if listing_id is not None else None
         artifact = run_skill(job["skill"], job["target"], job["params"],
                              Path(self.settings.data_dir)/"artifacts", binding=binding)
+        audit_type = job["skill"]
+        fingerprint = input_fingerprint(job)
+        artifact["audit_type"] = audit_type
+        artifact["input_fingerprint"] = fingerprint
+        # A listing-specific audit is about live evidence and is always worth
+        # publishing; a generic audit is deduped per type on its content hash.
+        dedup_key = f"last_published_artifact_hash:{job['label']}"
+        if listing_id is None and self.db.get_setting(dedup_key) == artifact['hash']:
+            self.db.log('artifact_check',{'status':'unchanged','audit':job['label'],
+                        'audit_type':audit_type,'input_fingerprint':fingerprint,
+                        'hash':artifact['hash'],'public_url':artifact.get('public_url')})
+            self.db.set_setting("audit_cursor", job["cursor_next"])
+            self.db.set_setting("last_daily_audit", day)
+            return artifact
         if self.publisher:
             try: artifact = self.publisher.publish(artifact)
             except Exception as exc:
@@ -274,14 +288,6 @@ class Worker:
                 # same audit next cycle rather than skipping it.
                 self.db.log("publisher", {"status":"error","error_type":type(exc).__name__,"audit":job["label"]})
                 return None
-        # A listing-specific audit is about live evidence and is always worth
-        # publishing; a generic audit is deduped per type on its content hash.
-        dedup_key = f"last_published_artifact_hash:{job['label']}"
-        if listing_id is None and self.db.get_setting(dedup_key) == artifact['hash']:
-            self.db.log('artifact_check',{'status':'unchanged','audit':job['label'],'hash':artifact['hash'],'public_url':artifact.get('public_url')})
-            self.db.set_setting("audit_cursor", job["cursor_next"])
-            self.db.set_setting("last_daily_audit", day)
-            return artifact
         try:
             sealed=seal_artifact(self.client,self.settings,artifact['hash'],job['label'])
             artifact['seal_id']=sealed.get('id')
@@ -289,6 +295,7 @@ class Worker:
             self.db.log("seal", {"status":"error","error_type":type(exc).__name__,"hash":artifact['hash'],"audit":job['label']})
         self.db.log("artifact", artifact)
         self.db.set_setting(dedup_key, artifact['hash'])
+        self.db.set_setting(f"last_audit_input_fingerprint:{job['label']}", fingerprint)
         self.db.set_setting("audit_cursor", job["cursor_next"])
         self.db.set_setting("last_daily_audit", day)
         prompt = {"artifact":artifact, "instruction":"Draft at most one evidence-first post. Include exact hash and limitations."}

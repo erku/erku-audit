@@ -25,6 +25,7 @@ on it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -33,6 +34,25 @@ ROTATION = ("self-redteam", "rail-audit", "leak-probe", "gate-probe")  # fixed, 
 _POLICY_PATH = Path(__file__).resolve().parent.parent / "config" / "policy.json"
 _MAX_LEAK_ROWS = 50
 _MAX_FIELD_LEN = 500
+
+
+def input_fingerprint(job: dict) -> str:
+    """Return the stable fingerprint of the audit evidence inputs.
+
+    Cursor position and publication state do not affect evidence, so they are
+    deliberately excluded.  This value is safe to retain in local audit state
+    and lets operators distinguish a repeated check from a check with changed
+    inputs before publishing it.
+    """
+    payload = {
+        "audit_type": job["skill"],
+        "target": job["target"],
+        "params": job["params"],
+        "listing_id": job.get("listing_id"),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _rail_ready(rail):

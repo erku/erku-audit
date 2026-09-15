@@ -26,6 +26,9 @@ def _gate(target, params):
 
 
 def _leak(target, params):
+    if not isinstance(target, dict) or not target:
+        return {'status':'inconclusive','findings':[],
+                'summary':'Provide a non-empty public data surface for heuristic leak inspection.'}
     findings = []
     def walk(value, path='$'):
         if isinstance(value,dict):
