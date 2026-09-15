@@ -114,6 +114,21 @@ def test_dashboard_shows_persisted_recovery_status_and_next_analysis(panel):
     assert '2100-01-01 00:00:00 UTC' in page.text
 
 
+def test_operational_pages_show_opportunity_project_and_recovery_state(panel):
+    client, db = panel
+    auth = ('admin', 'test-password')
+    db.log('opportunity', {'listing_id': 7, 'classification': 'supported', 'reason': 'allowed_audit', 'template_id': 'rail-report-v1'})
+    db.log('project', {'listing_id': 8, 'stage': 'qualify', 'status': 'accepted', 'name': 'erku-1f916-tool-8'})
+    db.set_setting('llm_retry_state', {'attempts': 1, 'blocked_until': 4102444800})
+    opportunities = client.get('/opportunities', auth=auth)
+    projects = client.get('/projects', auth=auth)
+    recovery = client.get('/recovery', auth=auth)
+    assert opportunities.status_code == projects.status_code == recovery.status_code == 200
+    assert '#7' in opportunities.text and 'rail-report-v1' in opportunities.text
+    assert '#8' in projects.text and 'erku-1f916-tool-8' in projects.text
+    assert 'Odzyskiwanie po limicie Ollama' in recovery.text and 'oczekuje na Ollama' in recovery.text
+
+
 def test_results_page_renders_on_empty_db(panel):
     client, db = panel
     response = client.get('/results', auth=('admin', 'test-password'))

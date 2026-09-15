@@ -4,6 +4,9 @@ x-common: &common
   env_file: .env
   environment:
     DATA_DIR: /data
+    # An operator can override MODE for a controlled deployment check without
+    # editing the persistent .env file (for example: $env:MODE='off').
+    MODE: ${MODE:-approve}
     OLLAMA_URL: http://host.docker.internal:11434
     OLLAMA_MODEL: deepseek-v4-flash:cloud
   volumes:
@@ -25,6 +28,12 @@ services:
   worker:
     <<: *common
     command: [python, -m, f916.loop]
+    healthcheck:
+      test: [CMD, python, -c, "import os, sqlite3, time; db=sqlite3.connect('/data/agent.sqlite3'); last=db.execute(\"SELECT MAX(created_at) FROM events WHERE kind='cycle'\").fetchone()[0]; assert last and time.time()-last <= max(180, int(os.getenv('CYCLE_SECONDS', '300')) * 2 + 60)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 180s
   dashboard:
     <<: *common
     command: [python, -m, uvicorn, dashboard.app:app, --host, 0.0.0.0, --port, '8080', --no-proxy-headers]
@@ -43,10 +52,14 @@ services:
   # in .env). MUST stay single-worker (see broker/app.py) — state serialisation
   # is in-process only. Not published to the host.
   broker:
-    <<: *common
+    build: .
+    image: f916-local:latest
     profiles: ["broker"]
     command: [python, -m, uvicorn, broker.app:app, --host, 0.0.0.0, --port, '8090', --workers, '1', --no-proxy-headers]
     environment:
+      DATA_DIR: /data
+      BROKER_TOKEN: ${BROKER_TOKEN:-}
+      BROKER_MAX_REPOS: ${BROKER_MAX_REPOS:-5}
       GITHUB_TOKEN_FILE: /run/secrets/github_token
       BROKER_STATE_FILE: /data/broker_state.json
     volumes:
@@ -54,6 +67,16 @@ services:
       - ./secrets/github_token:/run/secrets/github_token:ro
     expose:
       - "8090"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+    init: true
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=5)"]
       interval: 30s

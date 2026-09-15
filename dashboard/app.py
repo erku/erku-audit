@@ -14,8 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 ROOT = Path(__file__).parent
-PAGES = {'': 'Przegląd', 'actions': 'Akcje i ślady', 'inbox': 'Skrzynka', 'radar': 'Radar', 'queue': 'Kolejka', 'wallet': 'Portfel wypłat', 'persona': 'Persona', 'settings': 'Ustawienia', 'security': 'Bezpieczeństwo', 'tuning': 'Dostrajanie', 'benefits': 'Korzyści', 'audits': 'Audyty', 'results': 'Wyniki'}
-FILTERS = {'inbox': ('inbox', 'notification', 'mention'), 'radar': ('radar',), 'security': ('security', 'quarantine', 'blocked', 'defense', 'incident'), 'tuning': ('tuning', 'tuner', 'bandit_', 'policy_', 'reward_'), 'benefits': ('benefit', 'reward', 'grant'), 'audits': ('audit', 'skill', 'artifact'), 'actions': ('action', 'llm', 'cycle', 'trace', 'queue', 'api_call')}
+PAGES = {'': 'Przegląd', 'opportunities': 'Okazje', 'projects': 'Projekty', 'recovery': 'Odzyskiwanie', 'actions': 'Akcje i ślady', 'inbox': 'Skrzynka', 'radar': 'Radar', 'queue': 'Kolejka', 'wallet': 'Portfel wypłat', 'persona': 'Persona', 'settings': 'Ustawienia', 'security': 'Bezpieczeństwo', 'tuning': 'Dostrajanie', 'benefits': 'Korzyści', 'audits': 'Audyty', 'results': 'Wyniki'}
+FILTERS = {'inbox': ('inbox', 'notification', 'mention'), 'radar': ('radar',), 'security': ('security', 'quarantine', 'blocked', 'defense', 'incident'), 'tuning': ('tuning', 'tuner', 'bandit_', 'policy_', 'reward_'), 'benefits': ('benefit', 'reward', 'grant'), 'audits': ('audit', 'skill', 'artifact'), 'actions': ('action', 'llm', 'cycle', 'trace', 'queue', 'api_call'), 'opportunities': ('opportunity',), 'projects': ('project',)}
 LOOPBACK_HOSTS = {'localhost', '127.0.0.1', '::1'}
 
 
@@ -92,6 +92,31 @@ def _project_summary(db):
         by_stage[stage] = by_stage.get(stage, 0) + 1
     repos = db.get_setting('project_repos', [])
     return {'by_stage': by_stage, 'repos': len(repos) if isinstance(repos, list) else 0}
+
+
+def _recovery_summary(db, settings, now):
+    """Return only operator-safe recovery state; retry metadata contains no prompts."""
+    retry_state = db.get_setting('llm_retry_state', {}) or {}
+    if not isinstance(retry_state, dict):
+        retry_state = {}
+    last_ok = next((event for event in db.events('llm', 1000)
+                    if isinstance(event.get('data'), dict)
+                    and event['data'].get('status') == 'ok'
+                    and event['data'].get('task') == 'triage'), None)
+    throttle_until = (last_ok['created_at'] + getattr(settings, 'ordinary_cadence_seconds', 3600)) if last_ok else 0
+    blocked_until = retry_state.get('blocked_until') or 0
+    try:
+        blocked_until = float(blocked_until)
+    except (TypeError, ValueError):
+        blocked_until = 0
+    next_eligible = max(now, blocked_until, throttle_until)
+    return {
+        'status': 'oczekuje na Ollama' if blocked_until > now else 'gotowy',
+        'attempts': retry_state.get('attempts', 0),
+        'blocked_until': blocked_until,
+        'next_eligible': next_eligible,
+        'last_success_at': last_ok['created_at'] if last_ok else None,
+    }
 
 
 def _market_summary(db):
@@ -346,15 +371,13 @@ def create_app(settings=None, db=None):
         limits={'hour':getattr(settings,'llm_hourly_tokens',0),'day':getattr(settings,'llm_daily_tokens',0),'week':getattr(settings,'llm_weekly_tokens',0)}
         usage={'hour':db.llm_tokens_since(now-3600),'day':db.llm_tokens_since(now-86400),'week':db.llm_tokens_since(now-7*86400)}
         budget={key:{'used':usage[key],'limit':limits[key],'remaining':max(0,limits[key]-usage[key]) if limits[key] else None} for key in limits}
-        retry_state=db.get_setting('llm_retry_state',{}) or {}
-        last_ok=next((e for e in db.events('llm',1000) if e['data'].get('status')=='ok' and e['data'].get('task')=='triage'),None)
-        throttle_until=(last_ok['created_at']+getattr(settings,'ordinary_cadence_seconds',3600)) if last_ok else 0
-        next_eligible=max(now, retry_state.get('blocked_until') or 0, throttle_until)
+        recovery = _recovery_summary(db, settings, now)
+        next_eligible = recovery['next_eligible']
         import datetime as _dt
         next_eligible_text='teraz' if next_eligible<=now+1 else _dt.datetime.fromtimestamp(next_eligible,tz=_dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-        recovery_status='oczekuje na Ollama' if retry_state.get('blocked_until', 0)>now else 'gotowy'
+        recovery_status = recovery['status']
         results = safe(_build_results(db)) if page == 'results' else {}
-        context = {'request': request, 'page': page, 'pages': PAGES, 'title': PAGES[page], 'csrf': csrf_token(user), 'events': safe(events), 'pending': safe(pending), 'mode': db.get_setting('mode', settings.mode), 'persona': safe(db.get_setting('persona', '')), 'content_prompt': safe(db.get_setting('content_prompt', '')), 'handle': getattr(settings, 'handle', ''), 'model': getattr(settings, 'ollama_model', ''), 'has_key': bool(settings.api_key), 'payout_address': getattr(settings, 'payout_address', ''), 'wallet_preimage': safe(db.get_setting('payout_wallet_preimage')), 'wallet_submission': db.get_setting('payout_wallet_submission'), 'budget':budget, 'llm_token_limits_enabled':db.get_setting('llm_token_limits_enabled',getattr(settings,'llm_token_limits_enabled',False)), 'last_cycle':safe(last_cycle), 'worker_stale':not last_cycle or now-last_cycle['created_at']>max(180,getattr(settings,'cycle_seconds',900)*2+60), 'next_eligible_analysis':next_eligible_text, 'recovery_status':recovery_status, 'results':results}
+        context = {'request': request, 'page': page, 'pages': PAGES, 'title': PAGES[page], 'csrf': csrf_token(user), 'events': safe(events), 'pending': safe(pending), 'mode': db.get_setting('mode', settings.mode), 'persona': safe(db.get_setting('persona', '')), 'content_prompt': safe(db.get_setting('content_prompt', '')), 'handle': getattr(settings, 'handle', ''), 'model': getattr(settings, 'ollama_model', ''), 'has_key': bool(settings.api_key), 'payout_address': getattr(settings, 'payout_address', ''), 'wallet_preimage': safe(db.get_setting('payout_wallet_preimage')), 'wallet_submission': db.get_setting('payout_wallet_submission'), 'budget':budget, 'llm_token_limits_enabled':db.get_setting('llm_token_limits_enabled',getattr(settings,'llm_token_limits_enabled',False)), 'last_cycle':safe(last_cycle), 'worker_stale':not last_cycle or now-last_cycle['created_at']>max(180,getattr(settings,'cycle_seconds',900)*2+60), 'next_eligible_analysis':next_eligible_text, 'recovery_status':recovery_status, 'recovery':safe(recovery), 'results':results}
         return templates.TemplateResponse(request=request, name='panel.html', context=context)
 
     return app

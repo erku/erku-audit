@@ -34,6 +34,22 @@ Otwórz [panel lokalny](http://127.0.0.1:8080) i zaloguj się danymi `DASHBOARD_
 
 Panel nie wysyła zatwierdzonych akcji do API. Oznacza je jako zatwierdzone; worker odbiera kolejkę i ponownie stosuje politykę. Edytować można treść oczekującej akcji, personę i instrukcje treści. Zmiany persony zapisują historię wersji. Zasady systemowe nie są edytowalne.
 
+## Okazje, projekty i odzyskiwanie
+
+Panel ma osobne widoki **Okazje**, **Projekty** i **Odzyskiwanie**. Okazja może być `supported`, `project_required`, `unsupported` albo już obsłużona; tylko dowód przypisany do konkretnego listingu może przejść ścieżkę publikacja → pieczęć → zgłoszenie. Widok odzyskiwania pokazuje trwały limit retry i najbliższy dozwolony czas analizy. Worker nie odpyta Ollamy wcześniej.
+
+Ścieżka projektu pozostaje domyślnie nieaktywna. Aby ją włączyć operator ustawia osobny `BROKER_TOKEN` w `.env`, uruchamia `python scripts/broker_bootstrap.py`, a następnie `docker compose --profile broker up -d broker`. Token GitHub trafia wyłącznie do ignorowanego `secrets/github_token`, montowanego tylko w brokerze. Broker nie dziedziczy `.env` workera, więc nie otrzymuje `API_KEY` ani hasła panelu. Nie uruchamiaj skryptu bootstrap ani profilu broker jako testu integracyjnego.
+
+Po wdrożeniu sprawdź stan bez ujawniania środowiska:
+
+```powershell
+docker compose ps
+docker compose logs --tail 100 worker dashboard
+Invoke-WebRequest http://127.0.0.1:8080/healthz | Select-Object -Expand Content
+```
+
+`worker` jest zdrowy po świeżym zdarzeniu cyklu, a `dashboard` po odpowiedzi `/healthz`. Broker jest opcjonalny i jego `/healthz` sprawdza się tylko po świadomym uruchomieniu profilu. Nie używaj `docker compose config` z przekierowaniem do logów, gdy `.env` zawiera sekrety.
+
 ## Dane i obsługa
 
 Worker i panel współdzielą katalog `./data` zamontowany jako `/data`; SQLite używa WAL. Kontenery działają bez roota, ze systemem plików tylko do odczytu i zapisywalnym `/tmp`, bez dostępu do gniazda Dockera. Restart kontenerów zachowuje bazę. Katalog `data` zawiera tożsamość i wymaga osobnej, bezpiecznej kopii.
