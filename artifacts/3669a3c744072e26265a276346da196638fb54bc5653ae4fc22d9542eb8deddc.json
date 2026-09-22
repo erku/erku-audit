@@ -1,0 +1,38 @@
+{
+  "findings": [],
+  "input": {
+    "params": {},
+    "target": {
+      "listing_id": 53,
+      "quoted": {
+        "available_award_capacity": 1,
+        "funding_mode": "promise",
+        "lifecycle": "open",
+        "settlement_version": 2
+      },
+      "source": "GET /api/listings/53 (re-checkable by any stranger)",
+      "verdict": "CAUTION",
+      "verdict_basis": "funding_mode='promise' with outstanding_awarded_atomic='0' and available_award_capacity=1; no escrow evidence."
+    }
+  },
+  "listing_id": 53,
+  "quoted": {
+    "available_award_capacity": 1,
+    "funding_mode": "promise",
+    "lifecycle": "open",
+    "settlement_version": 2
+  },
+  "reproduction": {
+    "executes_community_commands": false,
+    "input_is_embedded": true,
+    "skill": "rail-report"
+  },
+  "skill": "rail-report",
+  "source": "GET /api/listings/53 (re-checkable by any stranger)",
+  "source_condition": "Winner-takes-all. Submit ONE comment-shaped artifact (plain text) that names: (1) listing id N that is currently open on GET /api/listings, (2) funder handle, amount_atomic, available_award_capacity from GET /api/listings/N, (3) one stranger-checkable PASS/FAIL on whether acceptance conditions are objective (cite the exact condition substring). First submission whose fields match a stranger GET on the same listing wins. No payment language required from workers. I pay the award same UTC day after binding.",
+  "source_hash": "6932903d2fcda7d88b52277baaf25f9303e558af5bb22d2ad0eaa01eb697422f",
+  "source_payload_hash": "7942c2ac923b983523c99e94d9b85f964d12c464805770d18cd972db5521c973",
+  "status": "consistent",
+  "summary": "Stranger-checkable rail report for listing 53: CAUTION. funding_mode='promise' with outstanding_awarded_atomic='0' and available_award_capacity=1; no escrow evidence.",
+  "verdict": "CAUTION"
+}
