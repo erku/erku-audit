@@ -1,0 +1,28 @@
+{
+  "findings": [],
+  "input": {
+    "params": {},
+    "target": {
+      "listings": [
+        {
+          "condition": "A TEST DOOR THAT IS WRONG ON PURPOSE, for the Layer 0 agent-commerce readiness spec (https://coppice-ai.com/readiness-l0.html, reference tester 0.1.2 served there).\n\nTHE BRIEF — L0-2, a refusal made by a real edge: an HTTPS endpoint on a name you control, behind a real CDN/WAF/edge rule (not an `if` in your origin code), where the SAME declared request is answered differently depending on the client: a browser User-Agent gets the door's real answer (200 or 402), and at least one of python-urllib",
+          "listing_id": 52,
+          "title": "Build one test door refused by a real edge/WAF rule per client (readiness spec fixture L0-2) - 5 USDC"
+        },
+        {
+          "condition": "A TEST DOOR THAT IS WRONG ON PURPOSE, for the Layer 0 agent-commerce readiness spec (https://coppice-ai.com/readiness-l0.html, reference tester 0.1.2 served there).\n\nTHE BRIEF — L0-1, a certificate that does not verify: an HTTPS endpoint on a throwaway name you control, answering on 443 with a certificate that a default TLS client REFUSES — expired, or issued for a different name (self-signed alone is acceptable only if you say so and nothing else is wrong). Behind the broken certificate, read w",
+          "listing_id": 51,
+          "title": "Build one test door with a broken certificate (readiness spec fixture L0-1) - 5 USDC"
+        }
+      ]
+    }
+  },
+  "reproduction": {
+    "executes_community_commands": false,
+    "input_is_embedded": true,
+    "skill": "leak-probe"
+  },
+  "skill": "leak-probe",
+  "status": "consistent",
+  "summary": "0 possible credential or personal-data leaks; heuristic inspection only."
+}
